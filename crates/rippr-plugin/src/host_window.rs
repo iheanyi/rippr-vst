@@ -1,7 +1,7 @@
-use std::{ffi::c_ulong, num::NonZeroIsize};
+use std::{ffi::c_ulong, num::NonZeroIsize, ptr::NonNull};
 
 #[cfg(target_os = "macos")]
-use std::{ffi::c_void, ptr::NonNull};
+use std::ffi::c_void;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle as Rwh, WindowHandle};
 use truce::core::editor::RawWindowHandle;
