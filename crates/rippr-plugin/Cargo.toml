@@ -1,0 +1,23 @@
+[package]
+name = "rippr-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+directories.workspace = true
+nice-plug = { version = "0.2.3", features = ["assert_process_allocs"] }
+novonotes_run_loop = { git = "https://github.com/novonotes/wxp.git", rev = "db0db1c0ba795fd434a981c903dcd882b638e5ed", package = "novonotes_run_loop" }
+parking_lot = "0.12"
+process_path.workspace = true
+rippr-core = { path = "../rippr-core" }
+rtrb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wxp = { git = "https://github.com/novonotes/wxp.git", rev = "db0db1c0ba795fd434a981c903dcd882b638e5ed", package = "wxp" }
