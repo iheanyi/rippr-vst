@@ -1,3 +1,4 @@
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EditAction {
     Copy,
@@ -8,6 +9,7 @@ enum EditAction {
     Redo,
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn edit_action(
     key: &str,
     command: bool,
