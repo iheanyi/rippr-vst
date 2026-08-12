@@ -1,8 +1,7 @@
-use std::{
-    ffi::{c_ulong, c_void},
-    num::NonZeroIsize,
-    ptr::NonNull,
-};
+use std::{ffi::c_ulong, num::NonZeroIsize};
+
+#[cfg(target_os = "macos")]
+use std::{ffi::c_void, ptr::NonNull};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle as Rwh, WindowHandle};
 use truce::core::editor::RawWindowHandle;
@@ -11,6 +10,7 @@ use truce::core::editor::RawWindowHandle;
 pub struct HostWindow(pub RawWindowHandle);
 
 impl HostWindow {
+    #[cfg(target_os = "macos")]
     pub fn appkit_view(self) -> Option<NonNull<c_void>> {
         match self.0 {
             RawWindowHandle::AppKit(view) => NonNull::new(view),
