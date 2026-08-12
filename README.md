@@ -1,5 +1,8 @@
 # rippr-vst
 
+[![CI](https://github.com/iheanyi/rippr-vst/actions/workflows/ci.yml/badge.svg)](https://github.com/iheanyi/rippr-vst/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 `rippr-vst` is a greenfield VST3 sample-acquisition instrument. Paste a public
 HTTPS media URL in the editor and the isolated Worker uses the bundled `yt-dlp`
 and FFmpeg executables to prepare the complete source as a stereo WAV. A real
@@ -7,7 +10,7 @@ waveform envelope is analyzed from that rendered file. The plug-in can then drag
 the friendly-named WAV directly onto a macOS DAW audio track, trigger ordinary
 sized samples from any MIDI note, or reveal the WAV as a fallback.
 
-The plug-in does not depend on another Rippr repository and does not embed a
+This is an independent project: the plug-in does not depend on another Rippr repository and does not embed a
 Tauri application runtime. Its React/TypeScript UI is compiled to one local HTML
 document and attached to the DAW-owned editor window with `wxp`. The typed
 frontend bridge deliberately remains shell-agnostic, so a standalone Tauri shell
@@ -32,6 +35,18 @@ headless validation do not start the Worker or access the network. Project
 restoration reads the persisted sample ID from the local cache and stays silent
 when that media is missing.
 
+## Repository layout
+
+```text
+crates/rippr-core/    Acquisition domain, cache, waveform, and playback engine
+crates/rippr-plugin/  VST3 adapter, WebView editor, native drag, and shortcuts
+crates/rippr-worker/  Isolated yt-dlp and FFmpeg worker process
+docs/                 Product specification and compatibility boundaries
+resources/            Pinned media-tool manifest; downloaded binaries stay ignored
+scripts/              macOS tool preparation and signed development bundling
+ui/                   React/TypeScript editor and checked-in embedded build
+```
+
 ## Build and test
 
 Prerequisites are a current stable Rust toolchain, Node.js, and the pinned
@@ -44,7 +59,16 @@ with:
 ./scripts/bundle-macos.sh
 ```
 
-The resulting development artifact is `target/bundled/rippr-vst.vst3`. The
+The resulting development artifact is `target/bundled/rippr-vst.vst3`. Install
+it for the current macOS user with:
+
+```sh
+mkdir -p "$HOME/Library/Audio/Plug-Ins/VST3"
+ditto target/bundled/rippr-vst.vst3 \
+  "$HOME/Library/Audio/Plug-Ins/VST3/rippr-vst.vst3"
+```
+
+Restart the DAW after replacing an already-loaded plug-in. The
 bundle script ad-hoc signs the nested Worker/tools before signing the enclosing
 VST3 bundle. Production distribution still requires your Developer ID signing
 identity and Apple notarization.
@@ -70,7 +94,7 @@ AU target; that is intentionally outside this MVP.
 VST3 does not offer a portable API for creating a DAW track or timeline clip.
 On macOS, drag the friendly-named WAV from the editor directly onto a DAW audio
 track; the plug-in starts a native AppKit drag session while preserving the
-content-addressed cache file. The editor's **Choose folder** action persists a
+content-addressed cache file. The editor's **Change** action persists a
 user-selected destination for these friendly WAVs; Reveal in Finder remains
 available as a fallback. Standard AppKit edit shortcuts, including Command-V,
 are routed to the focused WebView field even when the host intercepts key events.
@@ -97,4 +121,5 @@ are routed to the focused WebView field even when the host intercepts key events
   cancellation, and cache removal controls remain release engineering work.
 
 The complete product specification and compatibility gates live in
-`.scratch/rippr-vst-vst3-plugin/spec.md`.
+[`docs/product-spec.md`](docs/product-spec.md). Contributions are welcome; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the expected checks and project boundaries.

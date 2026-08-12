@@ -1,5 +1,5 @@
 ---
-title: "Build rippr-vst as an in-DAW sample acquisition instrument"
+title: "rippr-vst product specification"
 status: ready-for-agent
 triage_label: ready-for-agent
 tracker: local-markdown
