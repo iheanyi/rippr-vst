@@ -392,6 +392,12 @@ enum UiEvent {
     Ready {
         entry: UiLibraryEntry,
     },
+    HandoffReady {
+        entry: UiLibraryEntry,
+    },
+    HandoffFailed {
+        message: String,
+    },
     Failed {
         message: String,
     },
@@ -405,6 +411,7 @@ struct UiLibraryEntry {
     creator: Option<String>,
     source_url: String,
     duration_seconds: f64,
+    rendered_sample_rate: u32,
     waveform_peaks: Vec<[f32; 2]>,
     preview_available: bool,
     media_path: PathBuf,
@@ -427,6 +434,7 @@ impl UiLibraryEntry {
             creator: entry.creator.clone(),
             source_url: entry.source_url.clone(),
             duration_seconds: entry.frame_count as f64 / f64::from(entry.rendered_sample_rate),
+            rendered_sample_rate: entry.rendered_sample_rate,
             waveform_peaks: entry.waveform_peaks.clone(),
             preview_available,
             media_path: entry.media_path.clone(),
@@ -590,6 +598,7 @@ fn register_commands(handler: &WxpCommandHandler, state: EditorCommandState) {
     let paths_for_bootstrap = paths.clone();
     let sample_rate_for_bootstrap = Arc::clone(&host_sample_rate);
     let active_id_for_bootstrap = Arc::clone(&active_sample_id);
+    let active_path_for_bootstrap = Arc::clone(&active_media_path);
     let sample_directory_for_bootstrap = Arc::clone(&sample_directory);
     handler.register_sync("bootstrap", move |_context| {
         let sample_rate = sample_rate_for_bootstrap.load(Ordering::Acquire);
@@ -609,7 +618,11 @@ fn register_commands(handler: &WxpCommandHandler, state: EditorCommandState) {
                 let preview_available = PreparedSample::is_previewable(&entry.media_path);
                 let ui_entry = UiLibraryEntry::from_entry(&entry, preview_available);
                 if active_id.as_deref() == Some(entry.id.as_str()) && entry.media_path.is_file() {
-                    active_entry = Some(UiLibraryEntry::from_entry(&entry, preview_available));
+                    let mut ui_active_entry = UiLibraryEntry::from_entry(&entry, preview_available);
+                    if let Some(path) = active_path_for_bootstrap.lock().clone() {
+                        ui_active_entry.media_path = path;
+                    }
+                    active_entry = Some(ui_active_entry);
                 }
                 ui_entry
             })
@@ -820,8 +833,14 @@ fn register_commands(handler: &WxpCommandHandler, state: EditorCommandState) {
     });
 
     let sample_directory_for_choose = Arc::clone(&sample_directory);
+    let active_id_for_choose = Arc::clone(&active_sample_id);
+    let active_path_for_choose = Arc::clone(&active_media_path);
+    let sample_rate_for_choose = Arc::clone(&host_sample_rate);
     let data_directory_for_choose = paths.data.clone();
-    handler.register_sync("choose_sample_directory", move |_context| {
+    handler.register_sync("choose_sample_directory", move |context| {
+        let channel = context
+            .arg::<Channel>("channel")
+            .map_err(|error| error.to_string())?;
         let Some(directory) = choose_sample_directory()? else {
             return Ok::<_, String>(json!({ "cancelled": true }));
         };
@@ -829,7 +848,76 @@ fn register_commands(handler: &WxpCommandHandler, state: EditorCommandState) {
         save_sample_directory(&data_directory_for_choose, &directory)
             .map_err(|error| error.to_string())?;
         *sample_directory_for_choose.write() = directory.clone();
-        Ok(json!({ "path": directory }))
+
+        let active_handoff_pending = if let Some(id) = active_id_for_choose.read().clone() {
+            let active_id = Arc::clone(&active_id_for_choose);
+            let active_path = Arc::clone(&active_path_for_choose);
+            let data_directory = data_directory_for_choose.clone();
+            let handoff_directory = directory.clone();
+            let sample_rate = sample_rate_for_choose.load(Ordering::Acquire);
+            std::thread::Builder::new()
+                .name("rippr-handoff-rematerialize".into())
+                .spawn(move || {
+                    let result = RipprSession::open_cache(
+                        data_directory.join("library.sqlite3"),
+                        data_directory.join("media"),
+                        sample_rate,
+                    )
+                    .and_then(|session| session.library_entries())
+                    .map(|entries| entries.into_iter().find(|entry| entry.id == id));
+                    match result {
+                        Ok(Some(entry)) => {
+                            match prepare_handoff_file(
+                                &handoff_directory,
+                                &entry.media_path,
+                                &entry.id,
+                                &entry.title,
+                            ) {
+                                Ok(path)
+                                    if active_id.read().as_deref()
+                                        == Some(entry.id.as_str()) =>
+                                {
+                                    *active_path.lock() = Some(path.clone());
+                                    let mut entry = UiLibraryEntry::from_entry(
+                                        &entry,
+                                        PreparedSample::is_previewable(&entry.media_path),
+                                    );
+                                    entry.media_path = path;
+                                    let _ = channel.send(UiEvent::HandoffReady { entry });
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    let _ = channel.send(UiEvent::HandoffFailed {
+                                        message: format!(
+                                            "The folder changed, but the active WAV could not be prepared there: {error}"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            let _ = channel.send(UiEvent::HandoffFailed {
+                                message: "The folder changed, but the cached active WAV is missing."
+                                    .into(),
+                            });
+                        }
+                        Err(error) => {
+                            let _ = channel.send(UiEvent::HandoffFailed {
+                                message: format!(
+                                    "The folder changed, but the active WAV could not be loaded: {error}"
+                                ),
+                            });
+                        }
+                    }
+                })
+                .is_ok()
+        } else {
+            false
+        };
+        Ok(json!({
+            "path": directory,
+            "activeHandoffPending": active_handoff_pending,
+        }))
     });
 
     let producer_for_preview = Arc::clone(&ui_producer);
@@ -931,25 +1019,83 @@ fn prepare_handoff_file(
 
     std::fs::create_dir_all(sample_directory)?;
     let stem = friendly_wav_stem(title);
-    let mut destination = sample_directory.join(format!("{stem}.wav"));
-    if destination.is_file()
-        && std::fs::metadata(&destination)?.len() != std::fs::metadata(cache_path)?.len()
-    {
-        destination = sample_directory.join(format!(
-            "{stem} - {}.wav",
-            entry_id.chars().take(8).collect::<String>()
-        ));
-    }
-    if !destination.is_file() {
+    let short_id = entry_id.chars().take(8).collect::<String>();
+    for collision_index in 0_usize.. {
+        let file_name = match collision_index {
+            0 => format!("{stem}.wav"),
+            1 => format!("{stem} - {short_id}.wav"),
+            index => format!("{stem} - {short_id} ({index}).wav"),
+        };
+        let destination = sample_directory.join(file_name);
+        if destination.is_file() {
+            if files_have_same_contents(cache_path, &destination)? {
+                return Ok(destination);
+            }
+            continue;
+        }
+        if destination.exists() {
+            continue;
+        }
+
         match std::fs::hard_link(cache_path, &destination) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Ok(()) => return Ok(destination),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => {
-                std::fs::copy(cache_path, &destination)?;
+                let mut source = std::fs::File::open(cache_path)?;
+                let destination_file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&destination);
+                let mut destination_file = match destination_file {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error),
+                };
+                if let Err(error) = std::io::copy(&mut source, &mut destination_file) {
+                    drop(destination_file);
+                    let _ = std::fs::remove_file(&destination);
+                    return Err(error);
+                }
+                return Ok(destination);
             }
         }
     }
-    Ok(destination)
+    unreachable!("the collision suffix space is unbounded")
+}
+
+fn files_have_same_contents(first: &Path, second: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+
+    let first_metadata = std::fs::metadata(first)?;
+    let second_metadata = std::fs::metadata(second)?;
+    if first_metadata.len() != second_metadata.len() {
+        return Ok(false);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if first_metadata.dev() == second_metadata.dev()
+            && first_metadata.ino() == second_metadata.ino()
+        {
+            return Ok(true);
+        }
+    }
+
+    let mut first = std::io::BufReader::new(std::fs::File::open(first)?);
+    let mut second = std::io::BufReader::new(std::fs::File::open(second)?);
+    let mut first_buffer = [0_u8; 64 * 1024];
+    let mut second_buffer = [0_u8; 64 * 1024];
+    loop {
+        let first_read = first.read(&mut first_buffer)?;
+        let second_read = second.read(&mut second_buffer)?;
+        if first_read != second_read || first_buffer[..first_read] != second_buffer[..second_read] {
+            return Ok(false);
+        }
+        if first_read == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 fn friendly_wav_stem(title: &str) -> String {
@@ -1032,5 +1178,23 @@ mod tests {
             fs::metadata(&cache).unwrap().ino(),
             fs::metadata(&handoff).unwrap().ino()
         );
+    }
+
+    #[test]
+    fn same_size_title_collisions_never_reuse_the_wrong_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_a = root.path().join("cache-a.wav");
+        let cache_b = root.path().join("cache-b.wav");
+        fs::write(&cache_a, b"RIFF audio A").unwrap();
+        fs::write(&cache_b, b"RIFF audio B").unwrap();
+
+        let handoff_a =
+            prepare_handoff_file(root.path(), &cache_a, "entry-a", "Same title").unwrap();
+        let handoff_b =
+            prepare_handoff_file(root.path(), &cache_b, "entry-b", "Same title").unwrap();
+
+        assert_ne!(handoff_a, handoff_b);
+        assert_eq!(fs::read(handoff_a).unwrap(), b"RIFF audio A");
+        assert_eq!(fs::read(handoff_b).unwrap(), b"RIFF audio B");
     }
 }

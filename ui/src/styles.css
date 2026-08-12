@@ -2,7 +2,7 @@
 
 @theme {
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-sans--font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+  --font-sans--font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01", "ss03";
 }
 
 @layer base {
@@ -13,7 +13,7 @@
 
   body {
     min-width: 320px;
-    min-height: 100vh;
+    min-height: 100dvh;
     margin: 0;
     background: #11110f;
   }

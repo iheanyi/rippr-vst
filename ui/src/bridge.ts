@@ -8,6 +8,7 @@ export type LibraryEntry = {
   creator?: string;
   sourceUrl: string;
   durationSeconds: number;
+  renderedSampleRate: number;
   waveformPeaks: [number, number][];
   previewAvailable: boolean;
   mediaPath: string;
@@ -23,6 +24,8 @@ export type RipEvent =
       durationSeconds?: number;
     }
   | { type: "ready"; entry: LibraryEntry }
+  | { type: "handoff_ready"; entry: LibraryEntry }
+  | { type: "handoff_failed"; message: string }
   | { type: "failed"; message: string };
 
 export type BootstrapState = {
@@ -30,6 +33,11 @@ export type BootstrapState = {
   sampleDirectory: string;
   entries: LibraryEntry[];
   activeEntry?: LibraryEntry;
+};
+
+export type SampleDirectorySelection = {
+  path: string;
+  activeHandoffPending: boolean;
 };
 
 export interface RipprBridge {
@@ -46,7 +54,9 @@ export interface RipprBridge {
   stopPreview(): Promise<void>;
   startWavDrag(): Promise<void>;
   revealActiveSample(): Promise<void>;
-  chooseSampleDirectory(): Promise<string | undefined>;
+  chooseSampleDirectory(
+    onEvent: (event: RipEvent) => void,
+  ): Promise<SampleDirectorySelection | undefined>;
 }
 
 type WxpChannel<T> = {
@@ -121,9 +131,20 @@ export class NativeRipprBridge implements RipprBridge {
     await invoke("reveal_active_sample");
   }
 
-  async chooseSampleDirectory(): Promise<string | undefined> {
-    const result = await invoke<{ path?: string }>("choose_sample_directory");
-    return result.path;
+  async chooseSampleDirectory(
+    onEvent: (event: RipEvent) => void,
+  ): Promise<SampleDirectorySelection | undefined> {
+    const channel = new NativeChannel(onEvent);
+    const result = await invoke<{
+      path?: string;
+      activeHandoffPending?: boolean;
+    }>("choose_sample_directory", { channel });
+    return result.path
+      ? {
+          path: result.path,
+          activeHandoffPending: result.activeHandoffPending ?? false,
+        }
+      : undefined;
   }
 }
 
@@ -132,12 +153,14 @@ export class MockRipprBridge implements RipprBridge {
   dragStarts = 0;
   previewStarts = 0;
   previewStops = 0;
+  private activeEntry?: LibraryEntry;
   private readonly cachedEntry: LibraryEntry = {
     id: "cached-fixture",
     title: "Cached break",
     creator: "Fixture artist",
     sourceUrl: "https://example.test/cached",
     durationSeconds: 8,
+    renderedSampleRate: 48_000,
     waveformPeaks: [[-0.2, 0.3], [-0.8, 0.7], [-0.35, 0.5]],
     previewAvailable: true,
     mediaPath: "/tmp/cached-fixture.wav",
@@ -164,19 +187,18 @@ export class MockRipprBridge implements RipprBridge {
       creator: "Fixture artist",
       durationSeconds: 28.4,
     });
-    onEvent({
-      type: "ready",
-      entry: {
-        id: "fixture",
-        title: "Fixture break",
-        creator: "Fixture artist",
-        sourceUrl: request.sourceUrl,
-        durationSeconds: 28.4,
-        waveformPeaks: [[-0.1, 0.2], [-0.9, 0.85], [-0.4, 0.55]],
-        previewAvailable: true,
-        mediaPath: "/tmp/fixture.wav",
-      },
-    });
+    this.activeEntry = {
+      id: "fixture",
+      title: "Fixture break",
+      creator: "Fixture artist",
+      sourceUrl: request.sourceUrl,
+      durationSeconds: 28.4,
+      renderedSampleRate: 48_000,
+      waveformPeaks: [[-0.1, 0.2], [-0.9, 0.85], [-0.4, 0.55]],
+      previewAvailable: true,
+      mediaPath: "/tmp/fixture.wav",
+    };
+    onEvent({ type: "ready", entry: this.activeEntry });
   }
 
   async activateLibraryEntry(
@@ -184,6 +206,7 @@ export class MockRipprBridge implements RipprBridge {
     onEvent: (event: RipEvent) => void,
   ): Promise<void> {
     if (id !== this.cachedEntry.id) throw new Error("Cached sample is missing.");
+    this.activeEntry = this.cachedEntry;
     onEvent({ type: "ready", entry: this.cachedEntry });
   }
 
@@ -201,7 +224,19 @@ export class MockRipprBridge implements RipprBridge {
 
   async revealActiveSample(): Promise<void> {}
 
-  async chooseSampleDirectory(): Promise<string | undefined> {
-    return "/Users/fixture/Music/New Samples";
+  async chooseSampleDirectory(
+    onEvent: (event: RipEvent) => void,
+  ): Promise<SampleDirectorySelection | undefined> {
+    if (this.activeEntry) {
+      this.activeEntry = {
+        ...this.activeEntry,
+        mediaPath: `/Users/fixture/Music/New Samples/${this.activeEntry.title}.wav`,
+      };
+      onEvent({ type: "handoff_ready", entry: this.activeEntry });
+    }
+    return {
+      path: "/Users/fixture/Music/New Samples",
+      activeHandoffPending: Boolean(this.activeEntry),
+    };
   }
 }
