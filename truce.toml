@@ -1,0 +1,19 @@
+[vendor]
+name = "Iheanyi Ekechukwu"
+id = "com.iheanyi"
+url = "https://github.com/iheanyi/rippr-vst"
+au_manufacturer = "IhEk"
+
+[packaging]
+formats = ["vst3", "au2", "standalone"]
+preferred_scope = "user"
+
+[[plugin]]
+name = "Rippr"
+bundle_id = "rippr-vst"
+crate = "rippr-plugin"
+category = "instrument"
+description = "Acquire, preview, and drag DAW-ready samples without leaving your session."
+fourcc = "Ripr"
+vst3_subcategory = "Sampler"
+au_tag = "Sampler"

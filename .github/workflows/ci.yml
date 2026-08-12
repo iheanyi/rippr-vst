@@ -44,3 +44,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test Rust workspace
         run: cargo test --workspace
+      - name: Check real-time allocation discipline
+        run: cargo test -p rippr-plugin --features rt-paranoid
+      - name: Check standalone format
+        run: cargo check -p rippr-plugin --no-default-features --features standalone
+      - name: Check Audio Unit format
+        if: runner.os == 'macOS'
+        run: cargo check -p rippr-plugin --no-default-features --features au

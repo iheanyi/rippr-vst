@@ -37,11 +37,12 @@ mod platform {
     use std::ptr::NonNull;
 
     use block2::RcBlock;
-    use nice_plug::prelude::ParentWindowHandle;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{MainThreadMarker, sel};
     use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags, NSView};
+
+    use crate::host_window::HostWindow;
 
     use super::{EditAction, edit_action};
 
@@ -50,8 +51,8 @@ mod platform {
     }
 
     impl NativeEditShortcuts {
-        pub fn new(parent: ParentWindowHandle) -> Self {
-            let ParentWindowHandle::AppKitNsView(parent_view) = parent else {
+        pub fn new(parent: HostWindow) -> Self {
+            let Some(parent_view) = parent.appkit_view() else {
                 return Self { monitor: None };
             };
             if MainThreadMarker::new().is_none() {
@@ -129,12 +130,12 @@ mod platform {
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    use nice_plug::prelude::ParentWindowHandle;
+    use crate::host_window::HostWindow;
 
     pub struct NativeEditShortcuts;
 
     impl NativeEditShortcuts {
-        pub fn new(_parent: ParentWindowHandle) -> Self {
+        pub fn new(_parent: HostWindow) -> Self {
             Self
         }
     }

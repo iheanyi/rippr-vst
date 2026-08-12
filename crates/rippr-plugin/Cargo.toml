@@ -8,18 +8,35 @@ authors.workspace = true
 repository.workspace = true
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[bin]]
+name = "rippr-vst-standalone"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[features]
+default = ["vst3"]
+vst3 = ["dep:truce-vst3", "truce/vst3"]
+au = ["dep:truce-au"]
+standalone = ["dep:truce-standalone"]
+rt-paranoid = ["truce/rt-paranoid"]
 
 [dependencies]
 directories.workspace = true
-nice-plug = { version = "0.2.3", features = ["assert_process_allocs"] }
 novonotes_run_loop = { git = "https://github.com/novonotes/wxp.git", rev = "db0db1c0ba795fd434a981c903dcd882b638e5ed", package = "novonotes_run_loop" }
 parking_lot = "0.12"
 process_path.workspace = true
+raw-window-handle = "0.6"
 rippr-core = { path = "../rippr-core" }
 rtrb.workspace = true
+send_wrapper = "0.6"
 serde.workspace = true
 serde_json.workspace = true
+truce = { version = "=6.3.0", default-features = false }
+truce-au = { version = "=6.3.0", optional = true }
+truce-standalone = { version = "=6.3.0", features = ["gui"], optional = true }
+truce-vst3 = { version = "=6.3.0", optional = true }
 wxp = { git = "https://github.com/novonotes/wxp.git", rev = "db0db1c0ba795fd434a981c903dcd882b638e5ed", package = "wxp" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -30,3 +47,4 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 
 [dev-dependencies]
 tempfile.workspace = true
+truce-test = "=6.3.0"

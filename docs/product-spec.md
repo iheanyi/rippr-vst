@@ -9,17 +9,17 @@ tracker: local-markdown
 
 Beat makers currently have to leave their DAW, acquire audio in a separate application, convert it, find the resulting file, and then import it back into the project. That context switching makes quick sampling slow and breaks the creative flow.
 
-The user needs a VST3 instrument that accepts a supported public media URL inside the DAW, prepares the complete source away from the real-time audio thread, renders an accurate waveform, and exposes the result as playable plug-in audio when memory-safe and as a DAW-importable WAV file at a user-selected location.
+The user needs a VST3/AUv2 instrument that accepts a supported public media URL inside the DAW, prepares the complete source away from the real-time audio thread, renders an accurate waveform, and exposes the result as playable plug-in audio when memory-safe and as a DAW-importable WAV file at a user-selected location.
 
 The VST3 standard does not give a plug-in a portable way to create a host track or insert a clip on the host timeline. The product must therefore define “pass it into the DAW” as two explicit, host-compatible behaviors: emit the prepared sample through the plug-in's stereo output, and initiate a native file drag for the rendered WAV with a reveal-in-file-manager fallback.
 
 ## Solution
 
-Build `rippr-vst` as a greenfield Rust workspace containing a VST3 stereo instrument, an isolated download/transcode worker, a reusable sample-acquisition core, a content-addressed local sample library, and a React/TypeScript editor embedded as a child WebView.
+Build `rippr-vst` as a greenfield Rust workspace containing Truce VST3/AUv2 stereo instruments and a standalone host, an isolated download/transcode worker, a reusable sample-acquisition core, a content-addressed local sample library, and a React/TypeScript editor embedded as a child WebView.
 
 The user pastes a URL and starts a Rip Job for the complete source. A helper process uses bundled acquisition and media tools to download, transcode, and analyze the source without running network, process, file, decode, or allocation work in the DAW's real-time callback. When the job completes, previewable media is loaded in the background and transferred to the Playback Engine through a bounded lock-free handoff. Regardless of preview eligibility, the user can inspect the real waveform, save the friendly WAV to a chosen folder, drag it into the DAW, or reopen it from the local Sample Library.
 
-Use the active community `nice-plug` framework to export VST3 through the permissively licensed Rust `vst3` bindings. Build the editor with React, TypeScript, and Vite, embedded through `wxp`/Wry using the host-provided native parent window. `wxp` supplies Tauri-like `invoke` and `Channel` IPC, but the VST bundle will not run the Tauri application runtime. An optional standalone Tauri shell may be added later by sharing the same core and frontend bridge contracts.
+Use Truce 6.3.0 to export VST3 and AUv2 and to provide the standalone host. Build the editor with React, TypeScript, and Vite, embedded through `wxp`/Wry using the host-provided native parent window. `wxp` supplies Tauri-like `invoke` and `Channel` IPC, but the plug-in bundles do not run the Tauri application runtime.
 
 ## User Stories
 
@@ -79,14 +79,14 @@ Use the active community `nice-plug` framework to export VST3 through the permis
 - Treat this as a greenfield product. Do not depend on or port an existing Rippr repository. Establish the domain terms Rip Request, Rip Job, Prepared Sample, Active Sample, Library Entry, Playback Engine, and Worker and use them consistently across Rust, TypeScript, IPC, tests, and documentation.
 - Ship the first product as a VST3 stereo instrument/generator with no audio input, one stereo audio output, and MIDI event input. It emits the Active Sample as a one-shot and is intentionally not modeled as an insert effect.
 - Define DAW handoff as plug-in audio output plus native WAV file drag. Do not claim that the plug-in can create a host track or insert a timeline clip through VST3 because no portable VST3 API provides that capability.
-- Use the current stable `nice-plug` community framework and its current permissively licensed `vst3` bindings. Pin released versions in the lockfile and enable the framework's processing-allocation assertion in debug and CI builds. Do not use the maintenance-mode NIH-plug VST3 export path whose older bindings impose GPLv3 constraints.
+- Use Truce 6.3.0 for VST3, AUv2, and standalone exports. Pin the complete Truce crate family exactly, retain the lockfile, and enable Truce's real-time allocation assertion in its dedicated test lane.
 - Keep the VST3 format adapter thin. The product domain, worker client, library store, sample preparation, and Playback Engine must not expose VST3 COM types outside the plug-in adapter.
 - Build the editor with React, TypeScript, and Vite. Reuse normal web-platform layout and styling, but do not embed or start the Tauri runtime inside the DAW host process.
-- Embed the editor with `wxp` on top of Wry using the native parent window supplied by the host through the `nice-plug` Editor interface. Pin `wxp` to a reviewed Git revision until its public API stabilizes.
-- Treat the `nice-plug` plus `wxp` editor lifecycle as the first implementation milestone. The vertical slice must prove create, resize, focus, text entry, close, reopen, and asynchronous command delivery in at least one macOS and one Windows host before feature work expands.
+- Embed the editor with `wxp` on top of Wry using the native parent window supplied by the Truce `Editor` interface. Pin `wxp` to a reviewed Git revision until its public API stabilizes.
+- Treat the Truce plus `wxp` editor lifecycle as a release gate. Creation, VST3 resize, focus, text entry, close, reopen, and asynchronous command delivery must be proven in representative hosts. AUv2 opens at natural size under Truce 6.3.0 and is not a host-driven resize target.
 - Use `wxp`'s Tauri-like `invoke` interface for request/response commands and `Channel` for Rip Job and library events. Define one versioned, serde-backed command/event contract shared by Rust and TypeScript; unknown messages must fail safely.
 - Keep WebView assets local in production, disable developer tools in release builds, restrict navigation and custom protocols, and sanitize all metadata rendered by the editor. Opening a source URL in the system browser must be an explicit user action.
-- Split the application into focused modules: a pure acquisition/domain core, a Worker executable, a Worker client and supervisor, a content-addressed library store, a Prepared Sample decoder/resampler, a real-time Playback Engine, the VST3 adapter, the embedded editor adapter, and release tooling.
+- Split the application into focused modules: a pure acquisition/domain core, a Worker executable, a Worker client and supervisor, a content-addressed library store, a Prepared Sample decoder/resampler, a real-time Playback Engine, the Truce format adapter, the embedded editor adapter, and release tooling.
 - Run provider access and FFmpeg in a separately signed Worker process. The VST module must never load Python into the DAW process or invoke acquisition tools from the audio callback. The Worker is started only after an explicit user action from an open editor.
 - Bundle standalone yt-dlp and FFmpeg executables for each supported platform instead of requiring a system installation. Pass arguments directly without shell interpolation. Do not implement in-place self-updates of signed bundled executables; acquisition-tool updates ship as full product updates.
 - Use a versioned JSON-lines protocol over the Worker's standard input, standard output, and standard error streams. Requests include a job ID, canonical URL, and output policy. Events include accepted, metadata, progress, prepared, cancelled, failed, and worker-exited outcomes.
@@ -105,9 +105,9 @@ Use the active community `nice-plug` framework to export VST3 through the permis
 - Implement native file drag below the WebView layer. On macOS initiate an `NSDraggingSession` carrying a file URL; on Windows initiate an OLE file drag carrying `CF_HDROP`. Start the operation only from a current pointer gesture. Always provide Reveal in Finder or Explorer and Copy Path as fallbacks.
 - Do not set artificial source-duration, downloaded-byte, rendered-byte, or cache-usage ceilings. Keep one concurrent job per instance, validate HTTPS URLs, reject local-file and private-network targets in URL acquisition commands, and never accept an executable path from the WebView. Bound only in-memory preview loading so arbitrarily large successful acquisitions remain safe to save, analyze, reveal, and drag.
 - Do not support browser-cookie import, account credential capture, DRM handling, paywalled sources, or authenticated provider sessions in the first release. This is a technical scope boundary that keeps credentials out of the DAW host process and reduces provider-specific maintenance.
-- Target macOS and Windows VST3 bundles first. Build architecture-specific Worker and media-tool resources, sign nested executables before signing the enclosing bundle, notarize the macOS distribution, and include third-party notices. Linux, AU, AAX, and release CLAP packages require separate compatibility decisions.
+- Target macOS VST3, AUv2, and standalone first, with Windows VST3 next. Build architecture-specific Worker and media-tool resources, sign nested executables before signing the enclosing bundle, notarize the macOS distribution, and include third-party notices. Linux, AUv3, AAX, and release CLAP packages require separate compatibility decisions.
 - Validate the bundle with the Steinberg VST3 validator and pluginval in CI. Run smoke tests in representative macOS and Windows DAWs for editor lifecycle, text focus, job completion, project restore, offline render, MIDI timing, native drag, and repeated open/close behavior.
-- Keep an optional standalone UI feasible by defining a frontend bridge interface whose production implementations can be `wxp` and, later, Tauri. A standalone Tauri application is not required for the VST3 MVP and must not become a Worker prerequisite.
+- Keep the frontend bridge shell-agnostic. The Truce standalone host reuses the production `wxp` editor; a later Tauri shell remains optional and must not become a Worker prerequisite.
 
 ## Testing Decisions
 
@@ -121,7 +121,7 @@ Use the active community `nice-plug` framework to export VST3 through the permis
 - Treat Steinberg validator and pluginval at a meaningful strictness as automated release gates. Their purpose is lifecycle and host-contract validation, not proof of product behavior.
 - Maintain a small manual host matrix on current macOS and Windows releases. Verify at least one host from different vendors on each platform, with special attention to child-window parenting, DPI, keyboard focus, native file drag, project save/reopen, offline bounce, and repeated editor teardown.
 - Add long-running stress checks that acquire and replace fixture samples while rendering audio, repeatedly open and close the editor, cancel at each Worker stage, and terminate the host-side instance. Fail on deadlocks, audio discontinuities beyond the expected trigger/stop envelope, leaked worker processes, or unbounded cache growth.
-- There is no existing greenfield project test prior art. Use the `nice-plug` example plug-ins for host and parameter conventions, the `wxp` examples for WebView command/channel lifecycle, and official VST3 validators as external prior art rather than copying an unrelated application test structure.
+- Use Truce's examples and `truce-test` for host, parameter, state, editor, and real-time conventions; use the `wxp` examples for WebView command/channel lifecycle; and retain official format validators as external gates.
 
 ## Out of Scope
 
@@ -130,7 +130,7 @@ Use the active community `nice-plug` framework to export VST3 through the permis
 - Using an existing Rippr repository as a code, architecture, UI, schema, or test baseline.
 - Shipping a full Tauri runtime inside the VST3 plug-in process.
 - A standalone Tauri desktop product in the first release.
-- AU, AUv3, AAX, Linux packages, mobile targets, and cloud-hosted processing in the first release.
+- AUv3, AAX, Linux packages, mobile targets, and cloud-hosted processing in the first release.
 - Batch URL queues, playlists, account logins, imported browser cookies, DRM, paywall bypasses, and private/authenticated media.
 - Time stretching, tempo synchronization, pitch shifting, chromatic sampling, slicing, pads, multiple sample slots, velocity layers, polyphony, looping, effects, and stem separation.
 - Embedding full sample media in DAW project state or guaranteeing project portability to a machine without the same cache.
@@ -141,7 +141,7 @@ Use the active community `nice-plug` framework to export VST3 through the permis
 
 ### Feasibility assessment
 
-- **Rust VST3 instrument and real-time sample playback: high feasibility.** The current Rust ecosystem has permissively licensed VST3 bindings and an active community framework with VST3 export, state, parameters, MIDI, background-task support, bundling, and custom editors.
+- **Rust VST3/AUv2 instrument and real-time sample playback: high feasibility.** Truce provides format exports, state, parameters, MIDI, validation, bundling, and a custom-editor contract while Rippr retains its dedicated worker architecture.
 - **Acquisition, analysis, and cache work inside a DAW: high feasibility with process isolation.** The risky version is performing that work in the plug-in callback or loading a scripting runtime into the host. A separately signed Worker, streamed waveform analysis, and a lock-free Prepared Sample handoff make the boundary tractable.
 - **React/WebView editor: medium-to-high feasibility.** Wry supports child WebViews, and `wxp` specifically adds Tauri-like commands/channels and plug-in-host lifecycle fixes. `wxp` is still alpha and revision-pinned, so the editor lifecycle vertical slice is a mandatory early gate.
 - **Full Tauri embedded in VST3: low feasibility and not recommended.** Tauri assumes an application runtime and event loop, while VST3 gives the plug-in a host-owned parent view and host-controlled lifecycle. Reuse the React UI and Tauri interaction style through `wxp`; reserve Tauri itself for a later standalone shell.
@@ -158,8 +158,8 @@ Use the active community `nice-plug` framework to export VST3 through the permis
 
 - VST3 processor/controller separation and threading model: https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/API%2BDocumentation/Index.html
 - VST3 host-owned plug-in view contract: https://steinbergmedia.github.io/vst3_doc/base/classSteinberg_1_1IPlugView.html
-- Active Rust plug-in framework: https://codeberg.org/RustAudio/nice-plug
-- Permissively licensed Rust VST3 bindings: https://crates.io/crates/vst3
+- Truce framework and documentation: https://truce.audio/docs/
+- Truce v6.3.0 source: https://github.com/truce-audio/truce/tree/v6.3.0
 - Tauri-like WebView IPC for audio plug-ins: https://github.com/novonotes/wxp
 - Wry child WebViews and platform constraints: https://github.com/tauri-apps/wry
 - Cross-platform plug-in validation: https://github.com/Tracktion/pluginval

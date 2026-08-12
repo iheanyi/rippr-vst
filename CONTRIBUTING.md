@@ -15,11 +15,11 @@ cargo test --workspace
 (cd ui && npm test && npm run build)
 ```
 
-The macOS VST3 development bundle additionally requires
-`cargo-nice-plug 0.1.1` and the pinned media tools:
+The macOS VST3, AUv2, and standalone development bundles additionally require
+`cargo-truce 6.3.0` and the pinned media tools:
 
 ```sh
-cargo install cargo-nice-plug --version 0.1.1 --locked
+cargo install cargo-truce --version 6.3.0 --locked
 ./scripts/prepare-tools-macos-arm64.sh
 ./scripts/bundle-macos.sh
 ```
@@ -32,7 +32,9 @@ Run the same checks as CI:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test -p rippr-plugin --features rt-paranoid
 (cd ui && npm test && npm run build)
+cargo truce validate --pluginval --auval -p rippr-plugin
 ```
 
 If the editor changes, commit the regenerated `ui/dist/index.html`; it is
@@ -45,11 +47,12 @@ media tools, DAW projects, credentials, cookies, or rendered samples.
   work on the real-time audio callback.
 - Keep acquisition in the Worker process and pass command arguments directly;
   do not interpolate shell commands.
-- Keep VST3 types in the plug-in adapter rather than the reusable core.
+- Keep Truce and host-format types in the plug-in adapter rather than the
+  reusable core.
 - Treat native WAV drag and plug-in audio output as the DAW handoff contract;
   VST3 does not portably create host tracks or timeline clips.
-- Keep the frontend bridge shell-agnostic so a future standalone Tauri shell
-  can reuse the UI without making Tauri part of the VST runtime.
+- Keep the frontend bridge shell-agnostic so an optional Tauri shell could
+  reuse the UI without making Tauri part of a plug-in runtime.
 
 Provider changes are expected. Keep live-provider checks out of deterministic
 tests and use fixture executables and local WAVs instead.

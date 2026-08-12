@@ -2,7 +2,6 @@
 mod platform {
     use std::{cell::RefCell, ffi::c_void, path::Path, ptr::NonNull};
 
-    use nice_plug::prelude::ParentWindowHandle;
     use objc2::{
         AnyThread, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::ProtocolObject,
     };
@@ -14,6 +13,8 @@ mod platform {
         MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
         NSURL,
     };
+
+    use crate::host_window::HostWindow;
 
     #[derive(Default)]
     struct DragSourceIvars;
@@ -56,11 +57,8 @@ mod platform {
     }
 
     impl NativeDragContext {
-        pub fn new(parent: ParentWindowHandle) -> Self {
-            let parent_view = match parent {
-                ParentWindowHandle::AppKitNsView(view) => Some(view),
-                _ => None,
-            };
+        pub fn new(parent: HostWindow) -> Self {
+            let parent_view = parent.appkit_view();
             let source = MainThreadMarker::new().map(DragSource::new);
             Self {
                 parent_view,
@@ -123,12 +121,12 @@ mod platform {
 mod platform {
     use std::path::Path;
 
-    use nice_plug::prelude::ParentWindowHandle;
+    use crate::host_window::HostWindow;
 
     pub struct NativeDragContext;
 
     impl NativeDragContext {
-        pub fn new(_parent: ParentWindowHandle) -> Self {
+        pub fn new(_parent: HostWindow) -> Self {
             Self
         }
 
