@@ -1,7 +1,5 @@
 export type RipRequestInput = {
   sourceUrl: string;
-  startSeconds: number;
-  endSeconds: number;
 };
 
 export type LibraryEntry = {
@@ -10,6 +8,8 @@ export type LibraryEntry = {
   creator?: string;
   sourceUrl: string;
   durationSeconds: number;
+  waveformPeaks: [number, number][];
+  previewAvailable: boolean;
   mediaPath: string;
 };
 
@@ -27,6 +27,7 @@ export type RipEvent =
 
 export type BootstrapState = {
   sampleRate: number;
+  sampleDirectory: string;
   entries: LibraryEntry[];
   activeEntry?: LibraryEntry;
 };
@@ -42,7 +43,10 @@ export interface RipprBridge {
     onEvent: (event: RipEvent) => void,
   ): Promise<void>;
   preview(): Promise<void>;
+  stopPreview(): Promise<void>;
+  startWavDrag(): Promise<void>;
   revealActiveSample(): Promise<void>;
+  chooseSampleDirectory(): Promise<string | undefined>;
 }
 
 type WxpChannel<T> = {
@@ -105,25 +109,44 @@ export class NativeRipprBridge implements RipprBridge {
     await invoke("preview");
   }
 
+  async stopPreview(): Promise<void> {
+    await invoke("stop_preview");
+  }
+
+  async startWavDrag(): Promise<void> {
+    await invoke("start_wav_drag");
+  }
+
   async revealActiveSample(): Promise<void> {
     await invoke("reveal_active_sample");
+  }
+
+  async chooseSampleDirectory(): Promise<string | undefined> {
+    const result = await invoke<{ path?: string }>("choose_sample_directory");
+    return result.path;
   }
 }
 
 export class MockRipprBridge implements RipprBridge {
   readonly requests: RipRequestInput[] = [];
+  dragStarts = 0;
+  previewStarts = 0;
+  previewStops = 0;
   private readonly cachedEntry: LibraryEntry = {
     id: "cached-fixture",
     title: "Cached break",
     creator: "Fixture artist",
     sourceUrl: "https://example.test/cached",
     durationSeconds: 8,
+    waveformPeaks: [[-0.2, 0.3], [-0.8, 0.7], [-0.35, 0.5]],
+    previewAvailable: true,
     mediaPath: "/tmp/cached-fixture.wav",
   };
 
   async bootstrap(): Promise<BootstrapState> {
     return {
       sampleRate: 48_000,
+      sampleDirectory: "/Users/fixture/Music/Rippr Samples",
       entries: [this.cachedEntry],
     };
   }
@@ -148,7 +171,9 @@ export class MockRipprBridge implements RipprBridge {
         title: "Fixture break",
         creator: "Fixture artist",
         sourceUrl: request.sourceUrl,
-        durationSeconds: request.endSeconds - request.startSeconds,
+        durationSeconds: 28.4,
+        waveformPeaks: [[-0.1, 0.2], [-0.9, 0.85], [-0.4, 0.55]],
+        previewAvailable: true,
         mediaPath: "/tmp/fixture.wav",
       },
     });
@@ -162,7 +187,21 @@ export class MockRipprBridge implements RipprBridge {
     onEvent({ type: "ready", entry: this.cachedEntry });
   }
 
-  async preview(): Promise<void> {}
+  async preview(): Promise<void> {
+    this.previewStarts += 1;
+  }
+
+  async stopPreview(): Promise<void> {
+    this.previewStops += 1;
+  }
+
+  async startWavDrag(): Promise<void> {
+    this.dragStarts += 1;
+  }
 
   async revealActiveSample(): Promise<void> {}
+
+  async chooseSampleDirectory(): Promise<string | undefined> {
+    return "/Users/fixture/Music/New Samples";
+  }
 }

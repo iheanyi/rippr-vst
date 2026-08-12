@@ -37,6 +37,11 @@ impl PlaybackEngine {
         self.playhead = Some(0);
     }
 
+    pub fn stop(&mut self) {
+        self.pending_trigger = None;
+        self.playhead = None;
+    }
+
     pub fn render_frame(&mut self, gain: f32) -> [f32; 2] {
         let (Some(sample), Some(playhead)) = (&self.active_sample, self.playhead) else {
             return [0.0, 0.0];

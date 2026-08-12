@@ -1,6 +1,7 @@
 use std::{
     fs,
     io::{self, BufRead, Write},
+    net::ToSocketAddrs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -8,7 +9,7 @@ use std::{
 use clap::Parser;
 use rippr_core::{
     Acquisition, AcquisitionArtifact, RipError, RipRequest, WORKER_PROTOCOL_VERSION, WorkerCommand,
-    WorkerEvent, WorkerMessage,
+    WorkerEvent, WorkerMessage, is_private_or_special_address,
 };
 use serde::Deserialize;
 
@@ -25,8 +26,6 @@ struct Arguments {
 struct ExternalToolsAcquisition {
     yt_dlp: PathBuf,
     ffmpeg: PathBuf,
-    max_download_bytes: u64,
-    max_duration_seconds: f64,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +42,7 @@ impl Acquisition for ExternalToolsAcquisition {
         working_directory: &Path,
         emit: &mut dyn FnMut(WorkerEvent),
     ) -> Result<AcquisitionArtifact, RipError> {
+        validate_public_resolution(&request.source_url)?;
         emit(WorkerEvent::Accepted {
             job_id: request.job_id,
         });
@@ -55,6 +55,8 @@ impl Acquisition for ExternalToolsAcquisition {
             &self.yt_dlp,
             "yt-dlp",
             [
+                "--ignore-config".into(),
+                "--no-plugin-dirs".into(),
                 "--dump-single-json".into(),
                 "--skip-download".into(),
                 "--no-playlist".into(),
@@ -69,12 +71,6 @@ impl Acquisition for ExternalToolsAcquisition {
                     message: format!("invalid metadata JSON: {error}"),
                 }
             })?;
-        if metadata
-            .duration
-            .is_some_and(|duration| duration > self.max_duration_seconds)
-        {
-            return Err(RipError::LimitExceeded { kind: "duration" });
-        }
         let title = metadata.title.unwrap_or_else(|| "Untitled sample".into());
         emit(WorkerEvent::Metadata {
             job_id: request.job_id,
@@ -93,11 +89,11 @@ impl Acquisition for ExternalToolsAcquisition {
             &self.yt_dlp,
             "yt-dlp",
             [
+                "--ignore-config".into(),
+                "--no-plugin-dirs".into(),
                 "--no-playlist".into(),
                 "--no-warnings".into(),
                 "--quiet".into(),
-                "--max-filesize".into(),
-                self.max_download_bytes.to_string().into(),
                 "--format".into(),
                 "bestaudio/best".into(),
                 "--output".into(),
@@ -121,38 +117,27 @@ impl Acquisition for ExternalToolsAcquisition {
         if !downloaded_path.starts_with(&job_directory) {
             return Err(RipError::UnsafeArtifactPath);
         }
-        if fs::metadata(&downloaded_path)?.len() > self.max_download_bytes {
-            return Err(RipError::LimitExceeded {
-                kind: "download size",
-            });
-        }
-
         emit(WorkerEvent::Progress {
             job_id: request.job_id,
             stage: "transcode".into(),
             fraction: None,
         });
         let prepared_path = working_directory.join("prepared.wav");
-        let duration = request.trim.end_seconds - request.trim.start_seconds;
         run(
             &self.ffmpeg,
             "ffmpeg",
             [
                 "-nostdin".into(),
                 "-y".into(),
-                "-ss".into(),
-                format!("{:.6}", request.trim.start_seconds).into(),
-                "-t".into(),
-                format!("{duration:.6}").into(),
                 "-i".into(),
                 downloaded_path.into_os_string(),
                 "-vn".into(),
                 "-ac".into(),
                 "2".into(),
-                "-ar".into(),
-                "48000".into(),
                 "-c:a".into(),
                 "pcm_f32le".into(),
+                "-rf64".into(),
+                "auto".into(),
                 prepared_path.clone().into_os_string(),
             ],
         )?;
@@ -167,10 +152,26 @@ impl Acquisition for ExternalToolsAcquisition {
             source_url: request.source_url.clone(),
             title,
             creator: metadata.uploader,
-            duration_seconds: metadata.duration.unwrap_or(duration),
+            duration_seconds: metadata.duration,
             sample_path: prepared_path,
         })
     }
+}
+
+fn validate_public_resolution(source_url: &str) -> Result<(), RipError> {
+    let url = url::Url::parse(source_url).map_err(|_| RipError::UnsupportedUrl)?;
+    let host = url.host_str().ok_or(RipError::UnsupportedUrl)?;
+    let addresses = (host, url.port_or_known_default().unwrap_or(443))
+        .to_socket_addrs()?
+        .collect::<Vec<_>>();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| is_private_or_special_address(address.ip()))
+    {
+        return Err(RipError::UnsupportedUrl);
+    }
+    Ok(())
 }
 
 fn run(
@@ -209,8 +210,6 @@ fn run_worker(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
             WorkerCommand::Prepare {
                 protocol_version,
                 mut request,
-                max_download_bytes,
-                max_duration_seconds,
             } => {
                 if protocol_version != WORKER_PROTOCOL_VERSION {
                     write_event(WorkerEvent::Failed {
@@ -220,33 +219,22 @@ fn run_worker(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
                     })?;
                     continue;
                 }
-                let validated_request = RipRequest::new(
-                    &request.source_url,
-                    rippr_core::TrimRange::new(
-                        request.trim.start_seconds,
-                        request.trim.end_seconds,
-                    )
-                    .map_err(|error| error.to_string())?,
-                );
+                let validated_request = RipRequest::new(&request.source_url);
                 let Ok(validated_request) = validated_request else {
                     write_event(WorkerEvent::Failed {
                         job_id: request.job_id,
                         code: "invalid_request".into(),
-                        message: "only a valid public HTTPS URL and trim range are supported"
-                            .into(),
+                        message: "only a valid public HTTPS URL is supported".into(),
                     })?;
                     continue;
                 };
                 request.source_url = validated_request.source_url;
-                request.trim = validated_request.trim;
                 let working_directory = tempfile::Builder::new()
                     .prefix(&format!("job-{}-", request.job_id))
                     .tempdir_in(&arguments.workspace)?;
                 let acquisition = ExternalToolsAcquisition {
                     yt_dlp: arguments.yt_dlp.clone(),
                     ffmpeg: arguments.ffmpeg.clone(),
-                    max_download_bytes,
-                    max_duration_seconds,
                 };
                 let result =
                     acquisition.acquire(&request, working_directory.path(), &mut |event| {

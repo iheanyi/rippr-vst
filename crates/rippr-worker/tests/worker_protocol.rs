@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use rippr_core::{RipRequest, TrimRange, WorkerCommand, WorkerMessage};
+use rippr_core::{RipRequest, WORKER_PROTOCOL_VERSION, WorkerCommand, WorkerMessage};
 use tempfile::tempdir;
 
 #[test]
@@ -62,16 +62,10 @@ cp "$FAKE_SOURCE_WAV" "$output"
     fs::set_permissions(&yt_dlp, fs::Permissions::from_mode(0o755)).unwrap();
     fs::set_permissions(&ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let request = RipRequest::new(
-        "https://example.com/watch?v=fixture;touch-pwned",
-        TrimRange::new(0.25, 0.75).unwrap(),
-    )
-    .unwrap();
+    let request = RipRequest::new("https://example.com/watch?v=fixture;touch-pwned").unwrap();
     let command = WorkerCommand::Prepare {
-        protocol_version: 1,
+        protocol_version: WORKER_PROTOCOL_VERSION,
         request,
-        max_download_bytes: 1_000_000,
-        max_duration_seconds: 60.0,
     };
     let mut child = Command::new(env!("CARGO_BIN_EXE_rippr-worker"))
         .args([
@@ -117,9 +111,12 @@ cp "$FAKE_SOURCE_WAV" "$output"
     assert!(prepared_path.is_file());
 
     let arguments = fs::read_to_string(arguments).unwrap();
-    assert!(arguments.lines().any(|argument| argument == "-ss"));
-    assert!(arguments.lines().any(|argument| argument == "0.250000"));
-    assert!(arguments.lines().any(|argument| argument == "-t"));
-    assert!(arguments.lines().any(|argument| argument == "0.500000"));
+    assert!(!arguments.lines().any(|argument| argument == "-ss"));
+    assert!(!arguments.lines().any(|argument| argument == "-t"));
+    assert!(arguments.lines().any(|argument| argument == "-i"));
+    assert!(arguments.lines().any(|argument| argument == "-rf64"));
+    assert!(arguments.lines().any(|argument| argument == "auto"));
+    assert!(arguments.lines().any(|argument| argument == "pcm_f32le"));
+    assert!(!arguments.lines().any(|argument| argument == "-ar"));
     assert!(!root.path().join("pwned").exists());
 }

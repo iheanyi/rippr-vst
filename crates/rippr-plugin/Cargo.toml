@@ -21,3 +21,12 @@ rtrb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wxp = { git = "https://github.com/novonotes/wxp.git", rev = "db0db1c0ba795fd434a981c903dcd882b638e5ed", package = "wxp" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["block2", "NSApplication", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSImage", "NSOpenPanel", "NSPanel", "NSPasteboard", "NSResponder", "NSSavePanel", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSGeometry", "NSObject", "NSString", "NSURL"] }
+
+[dev-dependencies]
+tempfile.workspace = true

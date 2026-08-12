@@ -2,7 +2,7 @@ use std::{path::Path, sync::Mutex};
 
 use rusqlite::{Connection, params};
 
-use crate::{LibraryEntry, RipError, TrimRange};
+use crate::{LibraryEntry, RipError};
 
 pub(crate) struct LibraryStore {
     connection: Mutex<Connection>,
@@ -27,10 +27,25 @@ impl LibraryStore {
                 trim_end_seconds REAL NOT NULL,
                 rendered_sample_rate INTEGER NOT NULL,
                 frame_count INTEGER NOT NULL,
+                waveform_json TEXT NOT NULL DEFAULT '[]',
                 media_path TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );",
         )?;
+        let has_waveform = {
+            let mut statement = connection.prepare("PRAGMA table_info(library_entries)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|column| column == "waveform_json")
+        };
+        if !has_waveform {
+            connection.execute(
+                "ALTER TABLE library_entries ADD COLUMN waveform_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -41,22 +56,25 @@ impl LibraryStore {
             .connection
             .lock()
             .map_err(|_| RipError::LibraryUnavailable)?;
+        let waveform_json = serde_json::to_string(&entry.waveform_peaks)
+            .map_err(|error| RipError::Protocol(error.to_string()))?;
         connection.execute(
             "INSERT OR REPLACE INTO library_entries (
                 id, source_url, title, creator, source_duration_seconds,
                 trim_start_seconds, trim_end_seconds, rendered_sample_rate,
-                frame_count, media_path, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                frame_count, waveform_json, media_path, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 entry.id,
                 entry.source_url,
                 entry.title,
                 entry.creator,
                 entry.source_duration_seconds,
-                entry.trim.start_seconds,
-                entry.trim.end_seconds,
+                0.0_f64,
+                entry.source_duration_seconds,
                 entry.rendered_sample_rate,
                 entry.frame_count,
+                waveform_json,
                 entry.media_path.to_string_lossy(),
                 entry.created_at.to_rfc3339(),
             ],
@@ -72,7 +90,7 @@ impl LibraryStore {
         let mut statement = connection.prepare(
             "SELECT id, source_url, title, creator, source_duration_seconds,
                     trim_start_seconds, trim_end_seconds, rendered_sample_rate,
-                    frame_count, media_path, created_at
+                    frame_count, waveform_json, media_path, created_at
              FROM library_entries WHERE id = ?1",
         )?;
         let mut rows = statement.query([id])?;
@@ -90,7 +108,7 @@ impl LibraryStore {
         let mut statement = connection.prepare(
             "SELECT id, source_url, title, creator, source_duration_seconds,
                     trim_start_seconds, trim_end_seconds, rendered_sample_rate,
-                    frame_count, media_path, created_at
+                    frame_count, waveform_json, media_path, created_at
              FROM library_entries ORDER BY created_at DESC",
         )?;
         let entries = statement
@@ -101,24 +119,25 @@ impl LibraryStore {
 }
 
 fn entry_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryEntry, rusqlite::Error> {
-    let created_at: String = row.get(10)?;
+    let waveform_json: String = row.get(9)?;
+    let waveform_peaks = serde_json::from_str(&waveform_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let created_at: String = row.get(11)?;
     Ok(LibraryEntry {
         id: row.get(0)?,
         source_url: row.get(1)?,
         title: row.get(2)?,
         creator: row.get(3)?,
         source_duration_seconds: row.get(4)?,
-        trim: TrimRange {
-            start_seconds: row.get(5)?,
-            end_seconds: row.get(6)?,
-        },
         rendered_sample_rate: row.get(7)?,
         frame_count: row.get(8)?,
-        media_path: row.get::<_, String>(9)?.into(),
+        waveform_peaks,
+        media_path: row.get::<_, String>(10)?.into(),
         created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    10,
+                    11,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )

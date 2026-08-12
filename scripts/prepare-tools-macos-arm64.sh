@@ -4,6 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tool_directory="$repo_root/resources/tools"
 build_directory=$(mktemp -d)
+trap 'trash "$build_directory"' EXIT HUP INT TERM
 ffmpeg_version=8.1.2
 ffmpeg_source_sha=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
 yt_dlp_version=2026.07.04
@@ -13,9 +14,10 @@ mkdir -p "$tool_directory"
 
 curl --fail --location --silent --show-error \
   "https://github.com/yt-dlp/yt-dlp/releases/download/$yt_dlp_version/yt-dlp_macos" \
-  --output "$tool_directory/yt-dlp"
-printf '%s  %s\n' "$yt_dlp_sha" "$tool_directory/yt-dlp" | shasum -a 256 -c
-chmod +x "$tool_directory/yt-dlp"
+  --output "$build_directory/yt-dlp"
+printf '%s  %s\n' "$yt_dlp_sha" "$build_directory/yt-dlp" | shasum -a 256 -c
+chmod +x "$build_directory/yt-dlp"
+mv "$build_directory/yt-dlp" "$tool_directory/yt-dlp"
 
 curl --fail --location --silent --show-error \
   "https://ffmpeg.org/releases/ffmpeg-$ffmpeg_version.tar.xz" \

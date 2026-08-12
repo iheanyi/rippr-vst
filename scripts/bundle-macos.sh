@@ -6,6 +6,11 @@ tool_directory="$repo_root/resources/tools"
 bundle="$repo_root/target/bundled/rippr-vst.vst3"
 resource_directory="$bundle/Contents/Resources"
 
+if ! command -v cargo-nice-plug >/dev/null 2>&1; then
+  echo "Missing cargo-nice-plug 0.1.1. Install it with: cargo install cargo-nice-plug --version 0.1.1 --locked" >&2
+  exit 1
+fi
+
 for tool in yt-dlp ffmpeg; do
   if [ ! -x "$tool_directory/$tool" ]; then
     echo "Missing $tool_directory/$tool. Run scripts/prepare-tools-macos-arm64.sh first." >&2

@@ -20,6 +20,19 @@ describe("rip request flow", () => {
     expect(screen.getByText("Ready to play")).toBeVisible();
     expect(screen.getByRole("button", { name: "Preview sample" })).toBeEnabled();
     await waitFor(() => expect(bridge.requests).toHaveLength(1));
+    expect(bridge.requests[0]).toEqual({ sourceUrl: "https://example.test/fixture" });
+    expect(screen.queryByLabelText("Trim in")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Trim out")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Waveform for Fixture break")).toBeVisible();
+  });
+
+  it("lets the user choose the friendly WAV destination", async () => {
+    const bridge = new MockRipprBridge();
+    render(<App bridge={bridge} />);
+
+    expect(await screen.findByText("/Users/fixture/Music/Rippr Samples")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder" }));
+    expect(await screen.findByText("/Users/fixture/Music/New Samples")).toBeVisible();
   });
 
   it("browses cached samples and restores one without reacquiring it", async () => {
@@ -32,5 +45,41 @@ describe("rip request flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load Cached break" }));
     expect(await screen.findByText("Ready to play")).toBeVisible();
     expect(bridge.requests).toHaveLength(0);
+  });
+
+  it("starts the native WAV handoff from the current pointer gesture", async () => {
+    const bridge = new MockRipprBridge();
+    render(<App bridge={bridge} />);
+
+    fireEvent.change(screen.getByLabelText("Public media URL"), {
+      target: { value: "https://example.test/fixture" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Rip sample" }));
+    await screen.findByText("Ready to play");
+
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Drag WAV into your DAW" }),
+      { button: 0 },
+    );
+
+    await waitFor(() => expect(bridge.dragStarts).toBe(1));
+  });
+
+  it("toggles preview playback off as well as on", async () => {
+    const bridge = new MockRipprBridge();
+    render(<App bridge={bridge} />);
+
+    fireEvent.change(screen.getByLabelText("Public media URL"), {
+      target: { value: "https://example.test/fixture" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Rip sample" }));
+    await screen.findByText("Ready to play");
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview sample" }));
+    expect(await screen.findByRole("button", { name: "Stop preview" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Stop preview" }));
+    expect(await screen.findByRole("button", { name: "Preview sample" })).toBeVisible();
+    expect(bridge.previewStarts).toBe(1);
+    expect(bridge.previewStops).toBe(1);
   });
 });

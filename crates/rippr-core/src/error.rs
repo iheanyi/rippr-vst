@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RipError {
-    #[error("the trim range must be finite, start at or after zero, and end after it starts")]
-    InvalidTrimRange,
     #[error("only public HTTPS URLs are supported")]
     UnsupportedUrl,
     #[error("the acquisition worker returned an invalid WAV: {0}")]
@@ -22,8 +20,8 @@ pub enum RipError {
     LibraryUnavailable,
     #[error("{tool} failed: {message}")]
     ExternalTool { tool: &'static str, message: String },
-    #[error("the source exceeds the configured {kind} limit")]
-    LimitExceeded { kind: &'static str },
+    #[error("the WAV is too large for bounded in-memory preview")]
+    PreviewTooLarge,
     #[error("the worker returned a media path outside its job directory")]
     UnsafeArtifactPath,
     #[error("worker protocol error: {0}")]

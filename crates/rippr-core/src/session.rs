@@ -8,10 +8,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AcquisitionArtifact, LibraryEntry, PreparedSample, RipError, RipOutcome, RipRequest,
-    WorkerEvent, library::LibraryStore,
+    WorkerEvent, analyze_wav, library::LibraryStore,
 };
 
 pub trait Acquisition: Send + Sync {
+    /// Changes whenever the canonical prepared artifact produced by this
+    /// acquisition implementation changes.
+    fn cache_version(&self) -> &'static str {
+        "prepared-wav-v1"
+    }
+
     fn acquire(
         &self,
         request: &RipRequest,
@@ -63,11 +69,15 @@ impl RipprSession {
         request: RipRequest,
         mut emit: impl FnMut(WorkerEvent),
     ) -> Result<RipOutcome, RipError> {
-        let identity = acquisition_identity(&request, self.target_sample_rate);
-        if let Some(entry) = self.library.get(&identity)?
+        let identity = acquisition_identity(&request, self.acquisition.cache_version());
+        if let Some(mut entry) = self.library.get(&identity)?
             && entry.media_path.is_file()
         {
-            let sample = PreparedSample::from_wav(&entry.media_path, self.target_sample_rate)?;
+            let sample = preview_sample(&entry.media_path, self.target_sample_rate)?;
+            if entry.waveform_peaks.is_empty() {
+                entry.waveform_peaks = analyze_wav(&entry.media_path, 160)?.waveform_peaks;
+                self.library.insert(&entry)?;
+            }
             return Ok(RipOutcome { entry, sample });
         }
 
@@ -85,16 +95,19 @@ impl RipprSession {
 
         let media_path = self.media_directory.join(format!("{identity}.wav"));
         publish_atomically(&artifact.sample_path, &media_path)?;
-        let sample = PreparedSample::from_wav(&media_path, self.target_sample_rate)?;
+        let analysis = analyze_wav(&media_path, 160)?;
+        let sample = preview_sample(&media_path, self.target_sample_rate)?;
         let entry = LibraryEntry {
             id: identity,
             source_url: artifact.source_url,
             title: artifact.title,
             creator: artifact.creator,
-            source_duration_seconds: artifact.duration_seconds,
-            trim: request.trim,
-            rendered_sample_rate: sample.sample_rate(),
-            frame_count: sample.frame_count(),
+            source_duration_seconds: artifact
+                .duration_seconds
+                .unwrap_or(analysis.frame_count as f64 / f64::from(analysis.sample_rate)),
+            rendered_sample_rate: analysis.sample_rate,
+            frame_count: analysis.frame_count,
+            waveform_peaks: analysis.waveform_peaks,
             media_path,
             created_at: Utc::now(),
         };
@@ -109,14 +122,29 @@ impl RipprSession {
 
     /// Restores a cached entry for this session's host sample rate without reacquiring it.
     pub fn load_entry(&self, id: &str) -> Result<Option<RipOutcome>, RipError> {
-        let Some(entry) = self.library.get(id)? else {
+        let Some(mut entry) = self.library.get(id)? else {
             return Ok(None);
         };
         if !entry.media_path.is_file() {
             return Ok(None);
         }
-        let sample = PreparedSample::from_wav(&entry.media_path, self.target_sample_rate)?;
+        let sample = preview_sample(&entry.media_path, self.target_sample_rate)?;
+        if entry.waveform_peaks.is_empty() {
+            entry.waveform_peaks = analyze_wav(&entry.media_path, 160)?.waveform_peaks;
+            self.library.insert(&entry)?;
+        }
         Ok(Some(RipOutcome { entry, sample }))
+    }
+}
+
+fn preview_sample(
+    path: &Path,
+    target_sample_rate: u32,
+) -> Result<Option<PreparedSample>, RipError> {
+    match PreparedSample::from_wav(path, target_sample_rate) {
+        Ok(sample) => Ok(Some(sample)),
+        Err(RipError::PreviewTooLarge) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -135,13 +163,11 @@ impl Acquisition for CacheOnlyAcquisition {
     }
 }
 
-fn acquisition_identity(request: &RipRequest, target_sample_rate: u32) -> String {
+fn acquisition_identity(request: &RipRequest, cache_version: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"rippr-vst-output-v1\0");
+    digest.update(b"rippr-vst-full-source-output-v2\0");
     digest.update(request.source_url.as_bytes());
-    digest.update(request.trim.start_seconds.to_bits().to_le_bytes());
-    digest.update(request.trim.end_seconds.to_bits().to_le_bytes());
-    digest.update(target_sample_rate.to_le_bytes());
+    digest.update(cache_version.as_bytes());
     hex::encode(digest.finalize())
 }
 

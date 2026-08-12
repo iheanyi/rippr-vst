@@ -1,7 +1,7 @@
 use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Output, Stdio},
 };
 
 use crate::{
@@ -14,8 +14,34 @@ pub struct WorkerProcessAcquisition {
     yt_dlp_path: PathBuf,
     ffmpeg_path: PathBuf,
     workspace: PathBuf,
-    max_download_bytes: u64,
-    max_duration_seconds: f64,
+}
+
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("worker child is available")
+    }
+
+    fn wait_with_output(mut self) -> std::io::Result<Output> {
+        self.0
+            .take()
+            .expect("worker child is available")
+            .wait_with_output()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 impl WorkerProcessAcquisition {
@@ -30,19 +56,15 @@ impl WorkerProcessAcquisition {
             yt_dlp_path,
             ffmpeg_path,
             workspace,
-            max_download_bytes: 256 * 1024 * 1024,
-            max_duration_seconds: 60.0 * 60.0,
         }
-    }
-
-    pub fn with_limits(mut self, max_download_bytes: u64, max_duration_seconds: f64) -> Self {
-        self.max_download_bytes = max_download_bytes;
-        self.max_duration_seconds = max_duration_seconds;
-        self
     }
 }
 
 impl Acquisition for WorkerProcessAcquisition {
+    fn cache_version(&self) -> &'static str {
+        "yt-dlp-2026.07.04+ffmpeg-8.1.2+full-source-stereo-f32le-rf64-native-rate-v4"
+    }
+
     fn acquire(
         &self,
         request: &RipRequest,
@@ -50,7 +72,7 @@ impl Acquisition for WorkerProcessAcquisition {
         emit: &mut dyn FnMut(WorkerEvent),
     ) -> Result<AcquisitionArtifact, RipError> {
         std::fs::create_dir_all(&self.workspace)?;
-        let mut child = Command::new(&self.worker_path)
+        let child = Command::new(&self.worker_path)
             .args([
                 "--yt-dlp".as_ref(),
                 self.yt_dlp_path.as_os_str(),
@@ -63,25 +85,24 @@ impl Acquisition for WorkerProcessAcquisition {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        let mut child = ChildGuard::new(child);
         let command = WorkerCommand::Prepare {
             protocol_version: WORKER_PROTOCOL_VERSION,
             request: request.clone(),
-            max_download_bytes: self.max_download_bytes,
-            max_duration_seconds: self.max_duration_seconds,
         };
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| RipError::Protocol("worker standard input was not available".into()))?;
+        let mut stdin =
+            child.child_mut().stdin.take().ok_or_else(|| {
+                RipError::Protocol("worker standard input was not available".into())
+            })?;
         serde_json::to_writer(&mut stdin, &command)
             .map_err(|error| RipError::Protocol(error.to_string()))?;
         writeln!(stdin)?;
         drop(stdin);
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| RipError::Protocol("worker standard output was not available".into()))?;
+        let stdout =
+            child.child_mut().stdout.take().ok_or_else(|| {
+                RipError::Protocol("worker standard output was not available".into())
+            })?;
         let mut title = None;
         let mut creator = None;
         let mut duration_seconds = None;
@@ -142,8 +163,7 @@ impl Acquisition for WorkerProcessAcquisition {
             source_url: request.source_url.clone(),
             title: title.unwrap_or_else(|| "Untitled sample".into()),
             creator,
-            duration_seconds: duration_seconds
-                .unwrap_or(request.trim.end_seconds - request.trim.start_seconds),
+            duration_seconds,
             sample_path,
         })
     }

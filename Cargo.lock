@@ -1732,6 +1732,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -2174,15 +2175,20 @@ dependencies = [
 name = "rippr-plugin"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "directories 6.0.0",
  "nice-plug",
  "novonotes_run_loop",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "parking_lot",
  "process_path",
  "rippr-core",
  "rtrb",
  "serde",
  "serde_json",
+ "tempfile",
  "wxp",
 ]
 
@@ -2196,6 +2202,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "url",
  "uuid",
 ]
 

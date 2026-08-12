@@ -18,15 +18,23 @@ use nice_plug::{
 use novonotes_run_loop::{RunLoop, RunLoopGuard};
 use parking_lot::{Mutex, RwLock};
 use rippr_core::{
-    LibraryEntry, PlaybackEngine, PreparedSample, RipRequest, RipprSession, TrimRange, WorkerEvent,
+    LibraryEntry, PlaybackEngine, PreparedSample, RipRequest, RipprSession, WorkerEvent,
     WorkerProcessAcquisition,
 };
-use rtrb::{Consumer, Producer, PushError, RingBuffer};
+use rtrb::{Consumer, Producer, RingBuffer};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wxp::{
     Channel, Rect, WebContext, WebViewDispatch, WxpCommandHandler, WxpWebView, WxpWebViewBuilder,
 };
+
+mod native_directory;
+mod native_drag;
+mod native_edit_shortcuts;
+
+use native_directory::choose_sample_directory;
+use native_drag::NativeDragContext;
+use native_edit_shortcuts::NativeEditShortcuts;
 
 const UI_HTML: &str = include_str!("../../../ui/dist/index.html");
 const EDITOR_WIDTH: u32 = 960;
@@ -35,6 +43,7 @@ const EDITOR_HEIGHT: u32 = 660;
 enum UiToAudio {
     Activate(PreparedSample),
     Trigger,
+    Stop,
 }
 
 #[derive(Params)]
@@ -75,6 +84,7 @@ pub struct RipprPlugin {
     reclaimer_running: Arc<AtomicBool>,
     reclaimer_thread: Option<JoinHandle<()>>,
     paths: RipprPaths,
+    sample_directory: Arc<RwLock<PathBuf>>,
     active_media_path: Arc<Mutex<Option<PathBuf>>>,
     job_running: Arc<AtomicBool>,
     host_sample_rate: Arc<AtomicU32>,
@@ -100,6 +110,9 @@ impl Default for RipprPlugin {
             })
             .expect("could not start sample reclaimer");
 
+        let paths = RipprPaths::discover();
+        let sample_directory =
+            load_sample_directory(&paths.data).unwrap_or_else(|| paths.data.join("handoff"));
         Self {
             params: Arc::new(RipprParams::default()),
             playback: PlaybackEngine::new(),
@@ -108,7 +121,8 @@ impl Default for RipprPlugin {
             reclaim_producer,
             reclaimer_running,
             reclaimer_thread: Some(reclaimer_thread),
-            paths: RipprPaths::discover(),
+            paths,
+            sample_directory: Arc::new(RwLock::new(sample_directory)),
             active_media_path: Arc::new(Mutex::new(None)),
             job_running: Arc::new(AtomicBool::new(false)),
             host_sample_rate: Arc::new(AtomicU32::new(48_000)),
@@ -165,11 +179,13 @@ impl Plugin for RipprPlugin {
         Some(Box::new(RipprEditor {
             ui_producer: Arc::clone(&self.ui_producer),
             paths: self.paths.clone(),
+            sample_directory: Arc::clone(&self.sample_directory),
             active_media_path: Arc::clone(&self.active_media_path),
             job_running: Arc::clone(&self.job_running),
             host_sample_rate: Arc::clone(&self.host_sample_rate),
             active_sample_id: Arc::clone(&self.params.active_sample_id),
             size: Arc::new(AtomicU64::new(pack_size(EDITOR_WIDTH, EDITOR_HEIGHT))),
+            scale_factor: Arc::new(AtomicU64::new(1.0_f64.to_bits())),
             webview_dispatch: Arc::new(Mutex::new(None)),
         }))
     }
@@ -180,18 +196,24 @@ impl Plugin for RipprPlugin {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        while let Ok(command) = self.ui_consumer.pop() {
+        // Do not consume an activation unless the previous allocation can be
+        // handed off for background reclamation. This may defer UI commands by
+        // a block, but it guarantees the callback never frees or leaks sample
+        // memory even if the reclaimer thread is temporarily descheduled.
+        while !self.reclaim_producer.is_full() {
+            let Ok(command) = self.ui_consumer.pop() else {
+                break;
+            };
             match command {
                 UiToAudio::Activate(sample) => {
                     if let Some(previous) = self.playback.replace(sample) {
-                        if let Err(PushError::Full(previous)) = self.reclaim_producer.push(previous)
-                        {
-                            // Avoid freeing a large allocation in the real-time callback.
-                            std::mem::forget(previous);
-                        }
+                        self.reclaim_producer
+                            .push(previous)
+                            .expect("reclamation capacity was checked before activation");
                     }
                 }
                 UiToAudio::Trigger => self.playback.trigger_now(),
+                UiToAudio::Stop => self.playback.stop(),
             }
         }
 
@@ -235,6 +257,7 @@ impl RipprPlugin {
 
         let producer = Arc::clone(&self.ui_producer);
         let active_path = Arc::clone(&self.active_media_path);
+        let sample_directory = Arc::clone(&self.sample_directory);
         let running = Arc::clone(&self.restore_running);
         let paths = self.paths.clone();
         let _ = std::thread::Builder::new()
@@ -247,8 +270,19 @@ impl RipprPlugin {
                 )
                 .and_then(|session| session.load_entry(&id));
                 if let Ok(Some(outcome)) = outcome {
-                    *active_path.lock() = Some(outcome.entry.media_path.clone());
-                    let _ = producer.lock().push(UiToAudio::Activate(outcome.sample));
+                    if let Ok(handoff_path) = prepare_handoff_file(
+                        &sample_directory.read(),
+                        &outcome.entry.media_path,
+                        &outcome.entry.id,
+                        &outcome.entry.title,
+                    ) {
+                        let preview_ready = outcome.sample.is_none_or(|sample| {
+                            producer.lock().push(UiToAudio::Activate(sample)).is_ok()
+                        });
+                        if preview_ready {
+                            *active_path.lock() = Some(handoff_path);
+                        }
+                    }
                 }
                 running.store(false, Ordering::Release);
             });
@@ -295,6 +329,30 @@ impl RipprPaths {
     }
 }
 
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UserPreferences {
+    sample_directory: Option<PathBuf>,
+}
+
+fn load_sample_directory(data_directory: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(data_directory.join("preferences.json")).ok()?;
+    serde_json::from_slice::<UserPreferences>(&bytes)
+        .ok()?
+        .sample_directory
+}
+
+fn save_sample_directory(data_directory: &Path, sample_directory: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_directory)?;
+    let destination = data_directory.join("preferences.json");
+    let temporary = data_directory.join("preferences.json.partial");
+    let bytes = serde_json::to_vec_pretty(&UserPreferences {
+        sample_directory: Some(sample_directory.to_path_buf()),
+    })?;
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(temporary, destination)
+}
+
 const fn executable_name(name: &'static str) -> &'static str {
     #[cfg(target_os = "windows")]
     {
@@ -315,8 +373,6 @@ const fn executable_name(name: &'static str) -> &'static str {
 #[serde(rename_all = "camelCase")]
 struct UiRipRequest {
     source_url: String,
-    start_seconds: f64,
-    end_seconds: f64,
 }
 
 #[derive(Serialize)]
@@ -349,6 +405,8 @@ struct UiLibraryEntry {
     creator: Option<String>,
     source_url: String,
     duration_seconds: f64,
+    waveform_peaks: Vec<[f32; 2]>,
+    preview_available: bool,
     media_path: PathBuf,
 }
 
@@ -356,18 +414,21 @@ struct UiLibraryEntry {
 #[serde(rename_all = "camelCase")]
 struct UiBootstrap {
     sample_rate: u32,
+    sample_directory: PathBuf,
     entries: Vec<UiLibraryEntry>,
     active_entry: Option<UiLibraryEntry>,
 }
 
-impl From<&LibraryEntry> for UiLibraryEntry {
-    fn from(entry: &LibraryEntry) -> Self {
+impl UiLibraryEntry {
+    fn from_entry(entry: &LibraryEntry, preview_available: bool) -> Self {
         Self {
             id: entry.id.clone(),
             title: entry.title.clone(),
             creator: entry.creator.clone(),
             source_url: entry.source_url.clone(),
             duration_seconds: entry.frame_count as f64 / f64::from(entry.rendered_sample_rate),
+            waveform_peaks: entry.waveform_peaks.clone(),
+            preview_available,
             media_path: entry.media_path.clone(),
         }
     }
@@ -376,11 +437,13 @@ impl From<&LibraryEntry> for UiLibraryEntry {
 struct RipprEditor {
     ui_producer: Arc<Mutex<Producer<UiToAudio>>>,
     paths: RipprPaths,
+    sample_directory: Arc<RwLock<PathBuf>>,
     active_media_path: Arc<Mutex<Option<PathBuf>>>,
     job_running: Arc<AtomicBool>,
     host_sample_rate: Arc<AtomicU32>,
     active_sample_id: Arc<RwLock<Option<String>>>,
     size: Arc<AtomicU64>,
+    scale_factor: Arc<AtomicU64>,
     webview_dispatch: Arc<Mutex<Option<WebViewDispatch>>>,
 }
 
@@ -388,7 +451,19 @@ struct EditorResources {
     _webview: WxpWebView,
     _web_context: WebContext,
     _run_loop_guard: RunLoopGuard,
+    _edit_shortcuts: NativeEditShortcuts,
     webview_dispatch: Arc<Mutex<Option<WebViewDispatch>>>,
+}
+
+struct EditorCommandState {
+    ui_producer: Arc<Mutex<Producer<UiToAudio>>>,
+    paths: RipprPaths,
+    sample_directory: Arc<RwLock<PathBuf>>,
+    active_media_path: Arc<Mutex<Option<PathBuf>>>,
+    job_running: Arc<AtomicBool>,
+    host_sample_rate: Arc<AtomicU32>,
+    active_sample_id: Arc<RwLock<Option<String>>>,
+    native_drag: NativeDragContext,
 }
 
 impl Drop for EditorResources {
@@ -401,14 +476,20 @@ impl Editor for RipprEditor {
     fn spawn(&self, parent: ParentWindowHandle, _context: Arc<dyn GuiContext>) -> Box<dyn Any> {
         let run_loop_guard = RunLoop::init().expect("could not initialize editor run loop");
         let handler = Rc::new(WxpCommandHandler::new());
+        let native_drag = NativeDragContext::new(parent);
+        let edit_shortcuts = NativeEditShortcuts::new(parent);
         register_commands(
             &handler,
-            Arc::clone(&self.ui_producer),
-            self.paths.clone(),
-            Arc::clone(&self.active_media_path),
-            Arc::clone(&self.job_running),
-            Arc::clone(&self.host_sample_rate),
-            Arc::clone(&self.active_sample_id),
+            EditorCommandState {
+                ui_producer: Arc::clone(&self.ui_producer),
+                paths: self.paths.clone(),
+                sample_directory: Arc::clone(&self.sample_directory),
+                active_media_path: Arc::clone(&self.active_media_path),
+                job_running: Arc::clone(&self.job_running),
+                host_sample_rate: Arc::clone(&self.host_sample_rate),
+                active_sample_id: Arc::clone(&self.active_sample_id),
+                native_drag,
+            },
         );
         let mut web_context = WebContext::new(self.paths.data.join("webview"));
         let (width, height) = unpack_size(self.size.load(Ordering::Acquire));
@@ -427,6 +508,7 @@ impl Editor for RipprEditor {
             _webview: webview,
             _web_context: web_context,
             _run_loop_guard: run_loop_guard,
+            _edit_shortcuts: edit_shortcuts,
             webview_dispatch: Arc::clone(&self.webview_dispatch),
         })
     }
@@ -440,20 +522,32 @@ impl Editor for RipprEditor {
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {}
 
-    fn set_scale_factor(&self, _factor: f64) -> bool {
+    fn set_scale_factor(&self, factor: f64) -> bool {
+        if !factor.is_finite() || factor <= 0.0 {
+            return false;
+        }
+        self.scale_factor.store(factor.to_bits(), Ordering::Release);
         true
     }
 
     fn set_size(&self, size: PhysicalSize<u32>) -> bool {
-        if size.width < 640 || size.height < 480 {
+        // VST3 reports physical dimensions. AppKit's view coordinates are
+        // points (nice-plug leaves the macOS scale at 1), while Windows may
+        // provide an explicit display scale. Keep our canonical size logical,
+        // and let Wry convert those logical bounds exactly once.
+        let scale_factor = f64::from_bits(self.scale_factor.load(Ordering::Acquire));
+        let Some((width, height)) = logical_editor_size(size.width, size.height, scale_factor)
+        else {
+            return false;
+        };
+        if width < 640 || height < 480 {
             return false;
         }
-        self.size
-            .store(pack_size(size.width, size.height), Ordering::Release);
+        self.size.store(pack_size(width, height), Ordering::Release);
         if let Some(dispatch) = self.webview_dispatch.lock().as_ref() {
             let _ = dispatch.post_set_bounds(Rect {
                 position: wxp::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wxp::dpi::Size::Physical(size),
+                size: wxp::dpi::LogicalSize::new(f64::from(width), f64::from(height)).into(),
             });
         }
         true
@@ -472,18 +566,31 @@ const fn unpack_size(size: u64) -> (u32, u32) {
     ((size >> 32) as u32, size as u32)
 }
 
-fn register_commands(
-    handler: &WxpCommandHandler,
-    ui_producer: Arc<Mutex<Producer<UiToAudio>>>,
-    paths: RipprPaths,
-    active_media_path: Arc<Mutex<Option<PathBuf>>>,
-    job_running: Arc<AtomicBool>,
-    host_sample_rate: Arc<AtomicU32>,
-    active_sample_id: Arc<RwLock<Option<String>>>,
-) {
+fn logical_editor_size(width: u32, height: u32, scale_factor: f64) -> Option<(u32, u32)> {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return None;
+    }
+    Some((
+        (f64::from(width) / scale_factor).round() as u32,
+        (f64::from(height) / scale_factor).round() as u32,
+    ))
+}
+
+fn register_commands(handler: &WxpCommandHandler, state: EditorCommandState) {
+    let EditorCommandState {
+        ui_producer,
+        paths,
+        sample_directory,
+        active_media_path,
+        job_running,
+        host_sample_rate,
+        active_sample_id,
+        native_drag,
+    } = state;
     let paths_for_bootstrap = paths.clone();
     let sample_rate_for_bootstrap = Arc::clone(&host_sample_rate);
     let active_id_for_bootstrap = Arc::clone(&active_sample_id);
+    let sample_directory_for_bootstrap = Arc::clone(&sample_directory);
     handler.register_sync("bootstrap", move |_context| {
         let sample_rate = sample_rate_for_bootstrap.load(Ordering::Acquire);
         let session = RipprSession::open_cache(
@@ -499,15 +606,17 @@ fn register_commands(
             .map_err(|error| error.to_string())?
             .into_iter()
             .map(|entry| {
-                let ui_entry = UiLibraryEntry::from(&entry);
+                let preview_available = PreparedSample::is_previewable(&entry.media_path);
+                let ui_entry = UiLibraryEntry::from_entry(&entry, preview_available);
                 if active_id.as_deref() == Some(entry.id.as_str()) && entry.media_path.is_file() {
-                    active_entry = Some(UiLibraryEntry::from(&entry));
+                    active_entry = Some(UiLibraryEntry::from_entry(&entry, preview_available));
                 }
                 ui_entry
             })
             .collect();
         Ok::<_, String>(UiBootstrap {
             sample_rate,
+            sample_directory: sample_directory_for_bootstrap.read().clone(),
             entries,
             active_entry,
         })
@@ -518,6 +627,7 @@ fn register_commands(
     let job_running_for_activation = Arc::clone(&job_running);
     let sample_rate_for_activation = Arc::clone(&host_sample_rate);
     let active_id_for_activation = Arc::clone(&active_sample_id);
+    let sample_directory_for_activation = Arc::clone(&sample_directory);
     let paths_for_activation = paths.clone();
     handler.register_sync("activate_library_entry", move |context| {
         let id = context
@@ -537,6 +647,7 @@ fn register_commands(
         let active_path = Arc::clone(&active_path_for_activation);
         let running = Arc::clone(&job_running_for_activation);
         let active_id = Arc::clone(&active_id_for_activation);
+        let sample_directory = Arc::clone(&sample_directory_for_activation);
         let paths = paths_for_activation.clone();
         let sample_rate = sample_rate_for_activation.load(Ordering::Acquire);
         std::thread::Builder::new()
@@ -550,16 +661,34 @@ fn register_commands(
                 .and_then(|session| session.load_entry(&id));
                 match result {
                     Ok(Some(outcome)) => {
-                        *active_path.lock() = Some(outcome.entry.media_path.clone());
-                        if producer
-                            .lock()
-                            .push(UiToAudio::Activate(outcome.sample))
-                            .is_ok()
-                        {
+                        let handoff_path = match prepare_handoff_file(
+                            &sample_directory.read(),
+                            &outcome.entry.media_path,
+                            &outcome.entry.id,
+                            &outcome.entry.title,
+                        ) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                let _ = channel.send(UiEvent::Failed {
+                                    message: format!(
+                                        "Could not prepare the WAV for DAW handoff: {error}"
+                                    ),
+                                });
+                                running.store(false, Ordering::Release);
+                                return;
+                            }
+                        };
+                        let preview_available = outcome.sample.is_some();
+                        let preview_ready = outcome.sample.is_none_or(|sample| {
+                            producer.lock().push(UiToAudio::Activate(sample)).is_ok()
+                        });
+                        if preview_ready {
+                            *active_path.lock() = Some(handoff_path.clone());
                             *active_id.write() = Some(outcome.entry.id.clone());
-                            let _ = channel.send(UiEvent::Ready {
-                                entry: UiLibraryEntry::from(&outcome.entry),
-                            });
+                            let mut entry =
+                                UiLibraryEntry::from_entry(&outcome.entry, preview_available);
+                            entry.media_path = handoff_path;
+                            let _ = channel.send(UiEvent::Ready { entry });
                         } else {
                             let _ = channel.send(UiEvent::Failed {
                                 message: "The audio handoff queue is busy. Try again.".into(),
@@ -592,6 +721,8 @@ fn register_commands(
     let job_running_for_start = Arc::clone(&job_running);
     let sample_rate_for_start = Arc::clone(&host_sample_rate);
     let active_id_for_start = Arc::clone(&active_sample_id);
+    let sample_directory_for_start = Arc::clone(&sample_directory);
+    let paths_for_start = paths.clone();
     handler.register_sync("start_rip", move |context| {
         let request = context
             .arg::<UiRipRequest>("request")
@@ -599,10 +730,7 @@ fn register_commands(
         let channel = context
             .arg::<Channel>("channel")
             .map_err(|error| error.to_string())?;
-        let trim = TrimRange::new(request.start_seconds, request.end_seconds)
-            .map_err(|error| error.to_string())?;
-        let request =
-            RipRequest::new(request.source_url, trim).map_err(|error| error.to_string())?;
+        let request = RipRequest::new(request.source_url).map_err(|error| error.to_string())?;
         if job_running_for_start
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -614,8 +742,9 @@ fn register_commands(
         let active_path = Arc::clone(&active_path_for_start);
         let running = Arc::clone(&job_running_for_start);
         let active_id = Arc::clone(&active_id_for_start);
+        let sample_directory = Arc::clone(&sample_directory_for_start);
         let sample_rate = sample_rate_for_start.load(Ordering::Acquire);
-        let paths = paths.clone();
+        let paths = paths_for_start.clone();
         std::thread::Builder::new()
             .name("rippr-acquisition".into())
             .spawn(move || {
@@ -640,16 +769,34 @@ fn register_commands(
                 });
                 match result {
                     Ok(outcome) => {
-                        *active_path.lock() = Some(outcome.entry.media_path.clone());
-                        if producer
-                            .lock()
-                            .push(UiToAudio::Activate(outcome.sample))
-                            .is_ok()
-                        {
+                        let handoff_path = match prepare_handoff_file(
+                            &sample_directory.read(),
+                            &outcome.entry.media_path,
+                            &outcome.entry.id,
+                            &outcome.entry.title,
+                        ) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                let _ = channel.send(UiEvent::Failed {
+                                    message: format!(
+                                        "Could not prepare the WAV for DAW handoff: {error}"
+                                    ),
+                                });
+                                running.store(false, Ordering::Release);
+                                return;
+                            }
+                        };
+                        let preview_available = outcome.sample.is_some();
+                        let preview_ready = outcome.sample.is_none_or(|sample| {
+                            producer.lock().push(UiToAudio::Activate(sample)).is_ok()
+                        });
+                        if preview_ready {
+                            *active_path.lock() = Some(handoff_path.clone());
                             *active_id.write() = Some(outcome.entry.id.clone());
-                            let _ = channel.send(UiEvent::Ready {
-                                entry: UiLibraryEntry::from(&outcome.entry),
-                            });
+                            let mut entry =
+                                UiLibraryEntry::from_entry(&outcome.entry, preview_available);
+                            entry.media_path = handoff_path;
+                            let _ = channel.send(UiEvent::Ready { entry });
                         } else {
                             let _ = channel.send(UiEvent::Failed {
                                 message: "The audio handoff queue is busy. Try again.".into(),
@@ -672,6 +819,19 @@ fn register_commands(
         Ok(json!({ "accepted": true }))
     });
 
+    let sample_directory_for_choose = Arc::clone(&sample_directory);
+    let data_directory_for_choose = paths.data.clone();
+    handler.register_sync("choose_sample_directory", move |_context| {
+        let Some(directory) = choose_sample_directory()? else {
+            return Ok::<_, String>(json!({ "cancelled": true }));
+        };
+        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        save_sample_directory(&data_directory_for_choose, &directory)
+            .map_err(|error| error.to_string())?;
+        *sample_directory_for_choose.write() = directory.clone();
+        Ok(json!({ "path": directory }))
+    });
+
     let producer_for_preview = Arc::clone(&ui_producer);
     handler.register_sync("preview", move |_context| {
         producer_for_preview
@@ -681,13 +841,32 @@ fn register_commands(
         Ok::<_, String>(json!({ "triggered": true }))
     });
 
+    let producer_for_stop = Arc::clone(&ui_producer);
+    handler.register_sync("stop_preview", move |_context| {
+        producer_for_stop
+            .lock()
+            .push(UiToAudio::Stop)
+            .map_err(|_| "The preview queue is busy.".to_string())?;
+        Ok::<_, String>(json!({ "stopped": true }))
+    });
+
+    let active_path_for_reveal = Arc::clone(&active_media_path);
     handler.register_sync("reveal_active_sample", move |_context| {
-        let path = active_media_path
+        let path = active_path_for_reveal
             .lock()
             .clone()
             .ok_or_else(|| "No active sample is available.".to_string())?;
         reveal_file(&path).map_err(|error| error.to_string())?;
         Ok::<_, String>(json!({ "revealed": true }))
+    });
+
+    handler.register_sync("start_wav_drag", move |_context| {
+        let path = active_media_path
+            .lock()
+            .clone()
+            .ok_or_else(|| "No active sample is available.".to_string())?;
+        native_drag.start(&path)?;
+        Ok::<_, String>(json!({ "started": true }))
     });
 }
 
@@ -737,4 +916,121 @@ fn reveal_file(path: &Path) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
+fn prepare_handoff_file(
+    sample_directory: &Path,
+    cache_path: &Path,
+    entry_id: &str,
+    title: &str,
+) -> std::io::Result<PathBuf> {
+    if !cache_path.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the cached WAV is missing",
+        ));
+    }
+
+    std::fs::create_dir_all(sample_directory)?;
+    let stem = friendly_wav_stem(title);
+    let mut destination = sample_directory.join(format!("{stem}.wav"));
+    if destination.is_file()
+        && std::fs::metadata(&destination)?.len() != std::fs::metadata(cache_path)?.len()
+    {
+        destination = sample_directory.join(format!(
+            "{stem} - {}.wav",
+            entry_id.chars().take(8).collect::<String>()
+        ));
+    }
+    if !destination.is_file() {
+        match std::fs::hard_link(cache_path, &destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                std::fs::copy(cache_path, &destination)?;
+            }
+        }
+    }
+    Ok(destination)
+}
+
+fn friendly_wav_stem(title: &str) -> String {
+    const MAX_CHARS: usize = 80;
+
+    let mut stem = String::new();
+    let mut last_was_space = false;
+    for character in title.trim().chars().take(MAX_CHARS) {
+        let character = match character {
+            '/' | '\\' => '-',
+            ':' | '?' | '*' | '"' | '<' | '>' | '|' => '-',
+            character if character.is_control() => ' ',
+            character => character,
+        };
+        if character.is_whitespace() {
+            if !last_was_space && !stem.is_empty() {
+                stem.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            stem.push(character);
+            last_was_space = false;
+        }
+    }
+
+    let stem = stem.trim_matches([' ', '.']).to_owned();
+    if stem.is_empty() {
+        "Rippr Sample".into()
+    } else {
+        stem
+    }
+}
+
 nice_export_vst3!(RipprPlugin);
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    use super::{friendly_wav_stem, logical_editor_size, prepare_handoff_file};
+
+    #[test]
+    fn host_resize_is_converted_to_logical_units_once() {
+        assert_eq!(logical_editor_size(1_200, 800, 1.0), Some((1_200, 800)));
+        assert_eq!(logical_editor_size(1_800, 1_200, 1.5), Some((1_200, 800)));
+        assert_eq!(logical_editor_size(1_200, 800, 0.0), None);
+    }
+
+    #[test]
+    fn friendly_wav_names_are_safe_and_human_readable() {
+        assert_eq!(
+            friendly_wav_stem("  Kick / Snare: take 1  "),
+            "Kick - Snare- take 1"
+        );
+        assert_eq!(friendly_wav_stem("..."), "Rippr Sample");
+    }
+
+    #[test]
+    fn handoff_uses_a_friendly_hard_link_without_renaming_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("0123456789abcdef.wav");
+        fs::write(&cache, b"RIFF fixture").unwrap();
+
+        let handoff =
+            prepare_handoff_file(root.path(), &cache, "0123456789abcdef", "Amen Break / 1969")
+                .unwrap();
+
+        assert_eq!(
+            handoff.file_name().unwrap().to_string_lossy(),
+            "Amen Break - 1969.wav"
+        );
+        assert_eq!(fs::read(&handoff).unwrap(), b"RIFF fixture");
+        assert!(cache.exists());
+
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&cache).unwrap().ino(),
+            fs::metadata(&handoff).unwrap().ino()
+        );
+    }
+}

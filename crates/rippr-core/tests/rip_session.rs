@@ -7,8 +7,7 @@ use std::{
 };
 
 use rippr_core::{
-    Acquisition, AcquisitionArtifact, PlaybackEngine, RipRequest, RipprSession, TrimRange,
-    WorkerEvent,
+    Acquisition, AcquisitionArtifact, PlaybackEngine, RipRequest, RipprSession, WorkerEvent,
 };
 use tempfile::tempdir;
 
@@ -56,7 +55,7 @@ impl Acquisition for FixtureAcquisition {
             source_url: request.source_url.clone(),
             title: "Fixture break".into(),
             creator: Some("Fixture artist".into()),
-            duration_seconds: 4.0 / 48_000.0,
+            duration_seconds: Some(4.0 / 48_000.0),
             sample_path: path,
         })
     }
@@ -66,20 +65,17 @@ impl Acquisition for FixtureAcquisition {
 fn rip_request_becomes_a_library_entry_and_sample_accurate_audio() {
     let root = tempdir().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
+    let acquisition = Arc::new(FixtureAcquisition {
+        calls: Arc::clone(&calls),
+    });
     let session = RipprSession::open(
-        Arc::new(FixtureAcquisition {
-            calls: Arc::clone(&calls),
-        }),
+        acquisition.clone(),
         root.path().join("library.sqlite3"),
         root.path().join("media"),
         48_000,
     )
     .unwrap();
-    let request = RipRequest::new(
-        "https://example.test/fixture",
-        TrimRange::new(0.0, 4.0 / 48_000.0).unwrap(),
-    )
-    .unwrap();
+    let request = RipRequest::new("https://example.test/fixture").unwrap();
     let mut events = Vec::new();
 
     let outcome = session.rip(request, |event| events.push(event)).unwrap();
@@ -98,7 +94,7 @@ fn rip_request_becomes_a_library_entry_and_sample_accurate_audio() {
     );
 
     let mut engine = PlaybackEngine::new();
-    engine.activate(outcome.sample);
+    engine.activate(outcome.sample.clone().unwrap());
     engine.trigger_at(2);
     let mut output = [[0.0_f32; 2]; 6];
     engine.render(&mut output, 1.0);
@@ -115,20 +111,45 @@ fn rip_request_becomes_a_library_entry_and_sample_accurate_audio() {
         ]
     );
 
+    engine.trigger_now();
+    engine.stop();
+    let mut stopped_output = [[1.0_f32; 2]; 2];
+    engine.render(&mut stopped_output, 1.0);
+    assert_eq!(stopped_output, [[0.0, 0.0]; 2]);
+
     let library = session.library_entries().unwrap();
     assert_eq!(library.len(), 1);
     assert_eq!(library[0].id, outcome.entry.id);
+    assert_eq!(
+        outcome.entry.waveform_peaks,
+        [[-0.25, 0.25], [-0.5, 0.5], [-0.75, 0.75], [-1.0, 1.0],]
+    );
 
     let restored = session.load_entry(&outcome.entry.id).unwrap().unwrap();
     assert_eq!(restored.entry.id, outcome.entry.id);
-    assert_eq!(restored.sample.frame_count(), 4);
+    assert_eq!(restored.sample.unwrap().frame_count(), 4);
 
-    let duplicate_request = RipRequest::new(
-        "https://example.test/fixture",
-        TrimRange::new(0.0, 4.0 / 48_000.0).unwrap(),
-    )
-    .unwrap();
+    let duplicate_request = RipRequest::new("https://example.test/fixture").unwrap();
     let duplicate = session.rip(duplicate_request, |_| {}).unwrap();
     assert_eq!(duplicate.entry.id, outcome.entry.id);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    let different_host_rate = RipprSession::open(
+        acquisition,
+        root.path().join("library.sqlite3"),
+        root.path().join("media"),
+        44_100,
+    )
+    .unwrap();
+    let at_44_1 = different_host_rate
+        .rip(
+            RipRequest::new("https://example.test/fixture").unwrap(),
+            |_| {},
+        )
+        .unwrap();
+    assert_eq!(at_44_1.entry.id, outcome.entry.id);
+    assert_eq!(at_44_1.entry.rendered_sample_rate, 48_000);
+    assert_eq!(at_44_1.entry.frame_count, 4);
+    assert_eq!(at_44_1.sample.unwrap().sample_rate(), 44_100);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }

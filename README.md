@@ -1,10 +1,11 @@
 # rippr-vst
 
 `rippr-vst` is a greenfield VST3 sample-acquisition instrument. Paste a public
-HTTPS media URL in the editor, choose a trim range, and the isolated Worker uses
-the bundled `yt-dlp` and FFmpeg executables to prepare a stereo WAV. The plug-in
-can then trigger that immutable sample from any MIDI note or reveal the WAV for
-normal DAW import.
+HTTPS media URL in the editor and the isolated Worker uses the bundled `yt-dlp`
+and FFmpeg executables to prepare the complete source as a stereo WAV. A real
+waveform envelope is analyzed from that rendered file. The plug-in can then drag
+the friendly-named WAV directly onto a macOS DAW audio track, trigger ordinary
+sized samples from any MIDI note, or reveal the WAV as a fallback.
 
 The plug-in does not depend on another Rippr repository and does not embed a
 Tauri application runtime. Its React/TypeScript UI is compiled to one local HTML
@@ -33,8 +34,10 @@ when that media is missing.
 
 ## Build and test
 
-Prerequisites are a current stable Rust toolchain and Node.js. On Apple Silicon,
-prepare the pinned media tools and build the signed development bundle with:
+Prerequisites are a current stable Rust toolchain, Node.js, and the pinned
+bundler (`cargo install cargo-nice-plug --version 0.1.1 --locked`). On Apple
+Silicon, prepare the pinned media tools and build the signed development bundle
+with:
 
 ```sh
 ./scripts/prepare-tools-macos-arm64.sh
@@ -65,20 +68,33 @@ this bundle. Supporting GarageBand requires a separately packaged and validated
 AU target; that is intentionally outside this MVP.
 
 VST3 does not offer a portable API for creating a DAW track or timeline clip.
-The portable handoff is the plug-in's stereo audio output plus Reveal in Finder
-or Explorer. Native file drag is a host/platform integration milestone that is
-not included in this first build.
+On macOS, drag the friendly-named WAV from the editor directly onto a DAW audio
+track; the plug-in starts a native AppKit drag session while preserving the
+content-addressed cache file. The editor's **Choose folder** action persists a
+user-selected destination for these friendly WAVs; Reveal in Finder remains
+available as a fallback. Standard AppKit edit shortcuts, including Command-V,
+are routed to the focused WebView field even when the host intercepts key events.
 
 ## Current release boundaries
 
 - Public, unauthenticated HTTPS sources only.
 - One active acquisition or cache-load job per plug-in instance.
-- Stereo one-shot playback at the host's current sample rate.
+- Full-source acquisition has no configured duration, download-size, rendered-size,
+  or cache-quota ceiling. Available disk space and the media tools remain practical
+  constraints.
+- Acquisition selects the provider's best available audio stream and writes lossless
+  stereo 32-bit float PCM at the source's native sample rate, avoiding an unnecessary
+  sample-rate conversion before the WAV reaches the DAW.
+- Stereo one-shot playback at the host's current sample rate. Very large WAVs are
+  still saved, analyzed, revealed, and draggable, but in-plug-in preview is disabled
+  above the bounded in-memory preview threshold to protect the DAW process.
+- The editor's Preview control becomes Stop during playback and halts the active
+  one-shot immediately through the lock-free UI-to-audio command queue.
 - Local shared cache; no credentials, cookies, DRM handling, cloud upload, or
   in-place updater for bundled tools.
 - macOS Apple Silicon development bundling is automated here. Windows resources,
-  Authenticode signing, macOS notarization, native file drag, interactive job
-  cancellation, and cache quota/removal controls remain release engineering work.
+  Authenticode signing, macOS notarization, Windows native file drag, interactive job
+  cancellation, and cache removal controls remain release engineering work.
 
 The complete product specification and compatibility gates live in
 `.scratch/rippr-vst-vst3-plugin/spec.md`.

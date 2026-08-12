@@ -7,7 +7,9 @@ import { MockRipprBridge, NativeRipprBridge } from "./bridge";
 import "./styles.css";
 
 const bridge =
-  "invoke" in window ? new NativeRipprBridge() : new MockRipprBridge();
+  import.meta.env.DEV && !("invoke" in window)
+    ? new MockRipprBridge()
+    : new NativeRipprBridge();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
