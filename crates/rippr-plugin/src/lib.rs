@@ -353,7 +353,7 @@ fn save_sample_directory(data_directory: &Path, sample_directory: &Path) -> std:
     std::fs::rename(temporary, destination)
 }
 
-const fn executable_name(name: &'static str) -> &'static str {
+fn executable_name(name: &'static str) -> &'static str {
     #[cfg(target_os = "windows")]
     {
         match name {
