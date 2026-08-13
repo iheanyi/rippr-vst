@@ -58,6 +58,7 @@ impl LibraryStore {
             .map_err(|_| RipError::LibraryUnavailable)?;
         let waveform_json = serde_json::to_string(&entry.waveform_peaks)
             .map_err(|error| RipError::Protocol(error.to_string()))?;
+        let frame_count = frame_count_to_database(entry.frame_count)?;
         connection.execute(
             "INSERT OR REPLACE INTO library_entries (
                 id, source_url, title, creator, source_duration_seconds,
@@ -73,7 +74,7 @@ impl LibraryStore {
                 0.0_f64,
                 entry.source_duration_seconds,
                 entry.rendered_sample_rate,
-                entry.frame_count,
+                frame_count,
                 waveform_json,
                 entry.media_path.to_string_lossy(),
                 entry.created_at.to_rfc3339(),
@@ -119,6 +120,7 @@ impl LibraryStore {
 }
 
 fn entry_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryEntry, rusqlite::Error> {
+    let frame_count = frame_count_from_database(row.get(8)?)?;
     let waveform_json: String = row.get(9)?;
     let waveform_peaks = serde_json::from_str(&waveform_json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error))
@@ -131,7 +133,7 @@ fn entry_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryEntry, rusqlite::Err
         creator: row.get(3)?,
         source_duration_seconds: row.get(4)?,
         rendered_sample_rate: row.get(7)?,
-        frame_count: row.get(8)?,
+        frame_count,
         waveform_peaks,
         media_path: row.get::<_, String>(10)?.into(),
         created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
@@ -144,4 +146,35 @@ fn entry_from_row(row: &rusqlite::Row<'_>) -> Result<LibraryEntry, rusqlite::Err
             })?
             .with_timezone(&chrono::Utc),
     })
+}
+
+fn frame_count_to_database(frame_count: usize) -> Result<i64, rusqlite::Error> {
+    i64::try_from(frame_count)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+fn frame_count_from_database(frame_count: i64) -> Result<usize, rusqlite::Error> {
+    usize::try_from(frame_count).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            8,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{frame_count_from_database, frame_count_to_database};
+
+    #[test]
+    fn rejects_negative_database_frame_counts() {
+        assert!(frame_count_from_database(-1).is_err());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn rejects_frame_counts_larger_than_sqlite_integers() {
+        assert!(frame_count_to_database(usize::MAX).is_err());
+    }
 }
