@@ -1,4 +1,5 @@
 /target/
+/dist/
 /ui/node_modules/
 /resources/tools/
 /.rippr-dev/

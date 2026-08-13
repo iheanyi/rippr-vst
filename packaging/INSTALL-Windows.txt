@@ -1,0 +1,16 @@
+Rippr for Windows
+=================
+
+This archive contains Rippr.vst3 for 64-bit Windows VST3 hosts.
+
+Install for the current user:
+
+1. Copy Rippr.vst3 to %LOCALAPPDATA%\Programs\Common\VST3\
+2. Restart the DAW and rescan VST3 plug-ins if it does not scan automatically.
+
+For an all-users installation, an administrator may instead copy Rippr.vst3 to:
+
+    %COMMONPROGRAMFILES%\VST3\
+
+The plug-in module and bundled helper executables are Authenticode-signed and
+timestamped. AUv2 and the standalone application are macOS-only release formats.

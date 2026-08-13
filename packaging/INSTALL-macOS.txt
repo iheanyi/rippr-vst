@@ -1,0 +1,18 @@
+Rippr for macOS
+================
+
+This archive contains every currently supported macOS format:
+
+- Rippr.vst3 for Ableton Live and other VST3 hosts
+- Rippr.component for GarageBand, Logic Pro, and other AUv2 hosts
+- Rippr.app as a standalone application
+
+Install for the current user:
+
+1. Copy Rippr.vst3 to ~/Library/Audio/Plug-Ins/VST3/
+2. Copy Rippr.component to ~/Library/Audio/Plug-Ins/Components/
+3. Optionally copy Rippr.app to ~/Applications/
+4. Restart the DAW so it rescans plug-ins.
+
+The bundles are signed with a Developer ID Application certificate and notarized
+by Apple. The first launch may still require macOS to verify the bundle online.

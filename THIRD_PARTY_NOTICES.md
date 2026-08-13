@@ -6,5 +6,10 @@ The release bundle includes the following projects. Their full license texts and
 - `wxp` revision `db0db1c0ba795fd434a981c903dcd882b638e5ed` — MIT — https://github.com/novonotes/wxp
 - `yt-dlp` 2026.07.04 — Unlicense — https://github.com/yt-dlp/yt-dlp
 - FFmpeg 8.1.2 minimal macOS build — LGPL 2.1 or later — https://ffmpeg.org/
+- BtbN FFmpeg Windows build from `autobuild-2026-08-12-13-15` — LGPL 2.1 or later — https://github.com/BtbN/FFmpeg-Builds
 
-The minimal FFmpeg build disables external libraries and GPL components. Its exact configuration is recorded in `scripts/prepare-tools-macos-arm64.sh`.
+The minimal macOS FFmpeg build disables external libraries and GPL components.
+Its exact configuration is recorded in `scripts/prepare-tools-macos-arm64.sh`.
+The pinned Windows asset and digest are recorded in
+`resources/tools-windows-x64.lock`; its upstream license file is copied into the
+Windows bundle when present.
