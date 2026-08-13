@@ -1,0 +1,344 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Semantic version component to increment
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      confirm_release:
+        description: Build, sign, and publish this release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release candidate
+    if: ${{ inputs.confirm_release }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      base_sha: ${{ steps.candidate.outputs.base_sha }}
+      release_sha: ${{ steps.candidate.outputs.release_sha }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require the current main branch
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Run releases from main, not $GITHUB_REF." >&2
+            exit 1
+          fi
+          git fetch origin main --tags
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+            echo "The checkout is not the current origin/main." >&2
+            exit 1
+          fi
+      - name: Test release versioning
+        run: node --test scripts/release-version.test.mjs
+      - name: Bump project version
+        id: version
+        shell: bash
+        env:
+          VERSION_BUMP: ${{ inputs.bump }}
+        run: node scripts/release-version.mjs --bump "$VERSION_BUMP" --output "$GITHUB_OUTPUT"
+      - name: Verify the candidate metadata
+        shell: bash
+        run: |
+          node scripts/release-version.mjs --check
+          cargo metadata --locked --no-deps >/dev/null
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.version.outputs.tag }} already exists." >&2
+            exit 1
+          fi
+          git diff --check
+      - name: Create local release candidate
+        id: candidate
+        shell: bash
+        run: |
+          base_sha=$(git rev-parse HEAD)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock ui/package.json ui/package-lock.json
+          git commit -m "release: ${{ steps.version.outputs.tag }}"
+          release_sha=$(git rev-parse HEAD)
+          git branch release-candidate "$release_sha"
+          git bundle create "$RUNNER_TEMP/release-candidate.bundle" refs/heads/release-candidate "^$base_sha"
+          git bundle verify "$RUNNER_TEMP/release-candidate.bundle"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: Build macOS VST3, AUv2, and standalone
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      RIPPR_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+      - name: Check out release candidate
+        shell: bash
+        env:
+          EXPECTED_RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: |
+          git fetch "$RUNNER_TEMP/release-candidate/release-candidate.bundle" refs/heads/release-candidate
+          if [[ "$(git rev-parse FETCH_HEAD)" != "$EXPECTED_RELEASE_SHA" ]]; then
+            echo "Release candidate SHA mismatch." >&2
+            exit 1
+          fi
+          git checkout --detach FETCH_HEAD
+          node scripts/release-version.mjs --check
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install release tooling
+        run: |
+          brew install trash
+          brew install --cask pluginval
+          cargo install cargo-truce --version 6.3.0 --locked
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          : "${MACOS_CERTIFICATE_P12_BASE64:?MACOS_CERTIFICATE_P12_BASE64 is required}"
+          : "${MACOS_CERTIFICATE_PASSWORD:?MACOS_CERTIFICATE_PASSWORD is required}"
+          : "${RIPPR_CODESIGN_IDENTITY:?MACOS_CODESIGN_IDENTITY is required}"
+          : "${APPLE_ID:?APPLE_ID is required}"
+          : "${APPLE_TEAM_ID:?APPLE_TEAM_ID is required}"
+          : "${APPLE_APP_PASSWORD:?APPLE_APP_PASSWORD is required}"
+          certificate_path="$RUNNER_TEMP/rippr-signing.p12"
+          keychain_path="$RUNNER_TEMP/rippr-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | openssl base64 -d -A -out "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F "$RIPPR_CODESIGN_IDENTITY"
+          echo "RIPPR_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+      - name: Test Rust workspace
+        run: cargo test --workspace
+      - name: Prepare pinned media tools
+        run: ./scripts/prepare-tools-macos-arm64.sh
+      - name: Build, sign, validate, and notarize macOS formats
+        env:
+          RIPPR_VALIDATE_RELEASE: "1"
+        run: ./scripts/package-release-macos.sh "${{ needs.prepare.outputs.version }}" "$RUNNER_TEMP/release-output"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rippr-macos-release
+          path: |
+            ${{ runner.temp }}/release-output/*.zip
+            ${{ runner.temp }}/release-output/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary signing keychain
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if [[ -n "${RIPPR_KEYCHAIN_PATH:-}" && -f "$RIPPR_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$RIPPR_KEYCHAIN_PATH"
+          fi
+
+  build-windows:
+    name: Build Windows VST3
+    needs: prepare
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+      - name: Check out release candidate
+        shell: bash
+        env:
+          EXPECTED_RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: |
+          git fetch "$RUNNER_TEMP/release-candidate/release-candidate.bundle" refs/heads/release-candidate
+          if [[ "$(git rev-parse FETCH_HEAD)" != "$EXPECTED_RELEASE_SHA" ]]; then
+            echo "Release candidate SHA mismatch." >&2
+            exit 1
+          fi
+          git checkout --detach FETCH_HEAD
+          node scripts/release-version.mjs --check
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install Truce CLI
+        run: cargo install cargo-truce --version 6.3.0 --locked
+      - name: Materialize Authenticode certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_PFX_BASE64) {
+              throw "WINDOWS_CERTIFICATE_PFX_BASE64 is required."
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "rippr-signing.pfx"
+          [System.IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
+          "RIPPR_WINDOWS_PFX_PATH=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Test Rust workspace
+        run: cargo test --workspace
+      - name: Prepare pinned media tools
+        shell: pwsh
+        run: ./scripts/prepare-tools-windows-x64.ps1
+      - name: Build and Authenticode-sign Windows VST3
+        shell: pwsh
+        env:
+          RIPPR_WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: ./scripts/package-release-windows.ps1 -Version "${{ needs.prepare.outputs.version }}" -OutputDirectory "$env:RUNNER_TEMP/release-output"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rippr-windows-release
+          path: |
+            ${{ runner.temp }}/release-output/*.zip
+            ${{ runner.temp }}/release-output/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, build-macos, build-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release-candidate
+      - name: Check out release candidate
+        shell: bash
+        env:
+          EXPECTED_RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+        run: |
+          git fetch "$RUNNER_TEMP/release-candidate/release-candidate.bundle" refs/heads/release-candidate
+          if [[ "$(git rev-parse FETCH_HEAD)" != "$EXPECTED_RELEASE_SHA" ]]; then
+            echo "Release candidate SHA mismatch." >&2
+            exit 1
+          fi
+          git checkout --detach FETCH_HEAD
+      - uses: actions/download-artifact@v5
+        with:
+          name: rippr-macos-release
+          path: dist
+      - uses: actions/download-artifact@v5
+        with:
+          name: rippr-windows-release
+          path: dist
+      - name: Verify release archives and checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum --check -- ./*.sha256
+          sha256sum -- ./*.zip | sed 's#  \./#  #' > SHA256SUMS.txt
+      - name: Atomically publish release commit and tag
+        shell: bash
+        env:
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          git fetch origin main --tags
+          current_main=$(git rev-parse origin/main)
+          if [[ "$current_main" == "$BASE_SHA" ]]; then
+            if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null; then
+              echo "Tag $RELEASE_TAG unexpectedly exists." >&2
+              exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_TAG" "$RELEASE_SHA" -m "Rippr $RELEASE_TAG"
+            git push --atomic origin "$RELEASE_SHA:refs/heads/main" "refs/tags/$RELEASE_TAG"
+          elif [[ "$current_main" == "$RELEASE_SHA" ]]; then
+            tag_sha=$(git rev-parse "refs/tags/$RELEASE_TAG^{}" 2>/dev/null || true)
+            if [[ "$tag_sha" != "$RELEASE_SHA" ]]; then
+              echo "main is at the release commit, but $RELEASE_TAG is missing or points elsewhere." >&2
+              exit 1
+            fi
+          else
+            echo "origin/main advanced during the release. Run a new release after updating main." >&2
+            exit 1
+          fi
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            for asset in dist/*.zip dist/SHA256SUMS.txt; do
+              asset_name=$(basename "$asset")
+              if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fx "$asset_name" >/dev/null; then
+                echo "$asset_name is already attached; leaving it immutable."
+              else
+                gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+              fi
+            done
+          else
+            gh release create "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS.txt \
+              --verify-tag \
+              --generate-notes \
+              --title "Rippr v$RELEASE_VERSION" \
+              --repo "$GITHUB_REPOSITORY"
+          fi

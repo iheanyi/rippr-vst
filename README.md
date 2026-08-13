@@ -43,8 +43,8 @@ crates/rippr-core/    Acquisition domain, cache, waveform, and playback engine
 crates/rippr-plugin/  Truce adapter, WebView editor, native drag, and shortcuts
 crates/rippr-worker/  Isolated yt-dlp and FFmpeg worker process
 docs/                 Product specification and compatibility boundaries
-resources/            Pinned media-tool manifest; downloaded binaries stay ignored
-scripts/              macOS tool preparation and signed development bundling
+resources/            Pinned media-tool manifests; downloaded binaries stay ignored
+scripts/              Versioning, tool preparation, and signed release packaging
 ui/                   React/TypeScript editor and checked-in embedded build
 ```
 
@@ -74,8 +74,10 @@ install all three for the current macOS user with:
 
 Restart the DAW after replacing an already-loaded plug-in. The bundle script
 copies and ad-hoc signs the Worker/tools first, then signs each completed outer
-bundle. Production distribution still requires a Developer ID signing identity
-and Apple notarization.
+bundle. The manual Release workflow replaces ad-hoc signing with Developer ID
+signing and notarization for macOS, and builds an Authenticode-signed Windows
+VST3. Its secrets, version policy, recovery behavior, and host smoke matrix are
+documented in [`docs/release-pipeline.md`](docs/release-pipeline.md).
 
 Run the deterministic suites with:
 
@@ -122,9 +124,10 @@ are routed to the focused WebView field even when the host intercepts key events
   one-shot immediately through the lock-free UI-to-audio command queue.
 - Local shared cache; no credentials, cookies, DRM handling, cloud upload, or
   in-place updater for bundled tools.
-- macOS Apple Silicon development bundling is automated here. Windows resources,
-  Authenticode signing, macOS notarization, Windows native file drag, interactive job
-  cancellation, and cache removal controls remain release engineering work.
+- macOS Apple Silicon VST3/AUv2/standalone and Windows x64 VST3 release packaging
+  are automated by the manual GitHub Actions publisher. Windows native file drag,
+  interactive job cancellation, cache removal controls, and native installers remain
+  release engineering work.
 - The Truce identity is frozen as `com.iheanyi.rippr-vst`; its VST3 CID is
   `DAA50B63-A125-B8B9-0C04-FFB5A41FA2A2`. This intentionally replaces the
   pre-release nice-plug class identity.

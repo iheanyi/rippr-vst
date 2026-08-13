@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 tool_directory="$repo_root/resources/tools"
 build_directory=$(mktemp -d)
 trap 'trash "$build_directory"' EXIT HUP INT TERM

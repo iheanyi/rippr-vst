@@ -1,10 +1,20 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 tool_directory="$repo_root/resources/tools"
 bundle_directory="$repo_root/target/bundles"
 install_bundles=0
+codesign_identity=${RIPPR_CODESIGN_IDENTITY:--}
+
+sign_path() {
+  path=$1
+  if [ "$codesign_identity" = "-" ]; then
+    codesign --force --sign - "$path"
+  else
+    codesign --force --timestamp --options runtime --sign "$codesign_identity" "$path"
+  fi
+}
 
 if [ "${1:-}" = "--install" ]; then
   install_bundles=1
@@ -47,10 +57,10 @@ for bundle in \
   install -m 644 "$repo_root/THIRD_PARTY_LICENSES/Truce-License-1.0.txt" "$resource_directory/Truce-License-1.0.txt"
 
   for executable in rippr-worker yt-dlp ffmpeg; do
-    codesign --force --sign - "$resource_directory/$executable"
+    sign_path "$resource_directory/$executable"
   done
-  codesign --force --sign - "$bundle/Contents/MacOS/$plugin_executable"
-  codesign --force --sign - "$bundle"
+  sign_path "$bundle/Contents/MacOS/$plugin_executable"
+  sign_path "$bundle"
   codesign --verify --deep --strict --verbose=2 "$bundle"
 done
 
