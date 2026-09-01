@@ -88,7 +88,7 @@ jobs:
           git bundle verify "$RUNNER_TEMP/release-candidate.bundle"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-candidate
           path: ${{ runner.temp }}/release-candidate.bundle
@@ -169,7 +169,7 @@ jobs:
         env:
           RIPPR_VALIDATE_RELEASE: "1"
         run: ./scripts/package-release-macos.sh "${{ needs.prepare.outputs.version }}" "$RUNNER_TEMP/release-output"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rippr-macos-release
           path: |
@@ -240,7 +240,7 @@ jobs:
         env:
           RIPPR_WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: ./scripts/package-release-windows.ps1 -Version "${{ needs.prepare.outputs.version }}" -OutputDirectory "$env:RUNNER_TEMP/release-output"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rippr-windows-release
           path: |
