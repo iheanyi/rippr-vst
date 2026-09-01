@@ -110,7 +110,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.base_sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate
           path: ${{ runner.temp }}/release-candidate
@@ -195,7 +195,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.base_sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate
           path: ${{ runner.temp }}/release-candidate
@@ -262,7 +262,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.base_sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate
           path: ${{ runner.temp }}/release-candidate
@@ -277,11 +277,11 @@ jobs:
             exit 1
           fi
           git checkout --detach FETCH_HEAD
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: rippr-macos-release
           path: dist
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: rippr-windows-release
           path: dist
